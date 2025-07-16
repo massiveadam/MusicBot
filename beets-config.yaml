@@ -1,15 +1,22 @@
 directory: /music
 library: /app/.beets/musiclibrary.db
 
+art_filename: albumart
+threaded: yes
+original_date: no
+per_disc_numbering: no
+
 import:
-    copy: yes
-    move: no
-    write: yes
-    resume: ask
-    incremental: no
-    quiet_fallback: skip
-    timid: no
-    log: /app/.beets/import.log
+  move: yes            # Move files to /music
+  write: yes           # Write tags if we run anything manually (safe here)
+  copy: no
+  delete: no
+  autotag: no          # ❗ Explicitly disable metadata changes
+  timid: yes           # Prevent any accidental overwrites
+  resume: ask
+  quiet_fallback: skip
+  incremental: no
+  log: /app/.beets/import.log
 
 paths:
     default: $albumartist/$album%aunique{}/$track $title
