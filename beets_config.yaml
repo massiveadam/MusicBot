@@ -1,0 +1,53 @@
+directory: /music
+library: /app/.beets/musiclibrary.db
+
+import:
+    copy: yes
+    move: no
+    write: yes
+    resume: ask
+    incremental: no
+    quiet_fallback: skip
+    timid: no
+    log: /app/.beets/import.log
+
+paths:
+    default: $albumartist/$album%aunique{}/$track $title
+    singleton: Non-Album/$artist/$title
+    comp: Compilations/$album%aunique{}/$track $title
+
+plugins: web lastgenre scrub replaygain embedart extrafiles fetchart duplicates
+
+web:
+    host: 0.0.0.0
+    port: 8337
+    cors: yes
+
+replaygain:
+    auto: yes
+    backend: ffmpeg
+
+embedart:
+    auto: yes
+    maxwidth: 1000
+
+fetchart:
+    auto: yes
+    cautious: yes
+    cover_names: cover folder
+
+extrafiles:
+    patterns:
+        all: ['*.jpg', '*.jpeg', '*.png', '*.pdf', '*.log', '*.cue', '*.m3u']
+    paths:
+        all: $albumpath/
+
+scrub:
+    auto: yes
+
+lastgenre:
+    auto: yes
+    source: album
+
+duplicates:
+    checksum: ffmpeg

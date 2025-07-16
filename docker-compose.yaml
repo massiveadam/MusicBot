@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  musicbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: discord-musicbot
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - PLEX_TOKEN=${PLEX_TOKEN}
+      - PLEX_URL=${PLEX_URL}
+      - BEETS_WEB_ENABLED=true  # Optional: enable beets web interface
+    volumes:
+      - /mnt/user/data/media/music:/music
+      - /mnt/user/data/media/music/downloads:/downloads
+      - /mnt/user/appdata/streamrip-discord-bot/cookies.txt:/app/cookies.txt
+      - beets_data:/app/.beets
+    ports:
+      - "8337:8337"  # Optional: beets web interface
+    restart: unless-stopped
+    networks:
+      - musicbot
+
+  # Optional: If you want to run beets as a separate service
+  # beets-web:
+  #   image: linuxserver/beets
+  #   container_name: beets-web
+  #   environment:
+  #     - PUID=1000
+  #     - PGID=1000
+  #     - TZ=America/New_York
+  #   volumes:
+  #     - beets_config:/config
+  #     - /mnt/user/data/media/music:/music
+  #     - /mnt/user/data/media/music/downloads:/downloads
+  #   ports:
+  #     - "8338:8337"
+  #   restart: unless-stopped
+  #   networks:
+  #     - musicbot
+
+volumes:
+  beets_data:
+    driver: local
+
+networks:
+  musicbot:
+    driver: bridge
