@@ -569,4 +569,788 @@ async def fetch_pitchfork_best_new(limit: int = 5):
         albums = []
         for i, line in enumerate(lines):
             if line.startswith("[![Image") and "/photos/" in line:
-                img_match = re.search(r
+                img_match = re.search(r"\((https?://[^)]+)\)", line)
+                img = img_match.group(1) if img_match else None
+                for j in range(i + 1, len(lines)):
+                    if lines[j].startswith("[###"):
+                        m = re.search(r"\[### _([^_]+)_\]\(([^)]+)\)", lines[j])
+                        if m:
+                            album = m.group(1)
+                            album_url = m.group(2)
+                            k = j + 1
+                            while k < len(lines) and not lines[k].strip():
+                                k += 1
+                            artist = lines[k].strip() if k < len(lines) else "Unknown"
+                            albums.append({
+                                "artist": artist,
+                                "album": album,
+                                "url": album_url,
+                                "cover": img,
+                            })
+                        break
+                if len(albums) >= limit:
+                    break
+        return albums
+    except Exception as e:
+        print("[WARN fetch_pitchfork_best_new]", e)
+        return []
+
+
+async def fetch_brooklynvegan_notable(limit: int = 10):
+    """Fetch the latest BrooklynVegan Notable Releases of the Week."""
+    list_url = (
+        "https://r.jina.ai/https://www.brooklynvegan.com/category/music/new-releases/"
+    )
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(list_url) as resp:
+                if resp.status != 200:
+                    return []
+                text = await resp.text()
+        match = re.search(
+            r"\[Notable Releases of the Week[^\]]*\]\((https:[^)]+)\)", text
+        )
+        if not match:
+            return []
+        article_url = match.group(1)
+
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(f"https://r.jina.ai/{article_url}") as resp:
+                if resp.status != 200:
+                    return []
+                article_text = await resp.text()
+
+        pattern = re.compile(r"\*\*(.*?) - _([^_]+)_\*\*")
+        albums = []
+        for artist, album in pattern.findall(article_text):
+            artist = artist.strip()
+            album = album.strip()
+            if not artist or not album:
+                continue
+            albums.append({
+                "artist": artist,
+                "album": album,
+                "url": article_url,
+                "cover": None,
+            })
+            if len(albums) >= limit:
+                break
+
+        return albums
+    except Exception as e:
+        print("[WARN fetch_brooklynvegan_notable]", e)
+        return []
+
+
+async def create_collage(urls: list[str], cell_size: int = 100, columns: int = 3) -> BytesIO | None:
+    if not urls:
+        return None
+
+    async def fetch(session, url):
+        try:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    return BytesIO(await resp.read())
+        except Exception as e:
+            print("[WARN create_collage fetch]", e)
+        return None
+
+    async with aiohttp.ClientSession() as session:
+        images_bytes = await asyncio.gather(*(fetch(session, u) for u in urls))
+
+    images = []
+    for data in images_bytes:
+        if isinstance(data, BytesIO):
+            try:
+                img = Image.open(data).convert("RGB")
+                images.append(img)
+            except Exception as e:
+                print("[WARN create_collage open]", e)
+
+    if not images:
+        return None
+
+    columns = max(1, min(columns, len(images)))
+    rows = math.ceil(len(images) / columns)
+    collage = Image.new("RGB", (columns * cell_size, rows * cell_size))
+    for idx, img in enumerate(images):
+        img = img.resize((cell_size, cell_size))
+        x = (idx % columns) * cell_size
+        y = (idx // columns) * cell_size
+        collage.paste(img, (x, y))
+
+    output = BytesIO()
+    collage.save(output, format="JPEG")
+    output.seek(0)
+    return output
+
+
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if payload.user_id == bot.user.id:
+        return  # Ignore bot's own reactions
+
+    guild = bot.get_guild(payload.guild_id)
+    channel = guild.get_channel(payload.channel_id)
+    member = guild.get_member(payload.user_id)
+
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except Exception as e:
+        print(f"[ERROR] Could not fetch message: {e}")
+        return
+
+    emoji = str(payload.emoji)
+    if message.id not in saved_embeds:
+        return  # Not one of our tracked messages
+
+    url = saved_embeds[message.id]["url"]
+
+    # Create fake interaction with message + user (for download/save/etc)
+    try:
+        fake_interaction = FakeInteraction(message=message, user=member)
+    except Exception as e:
+        print(f"[ERROR] Failed to create FakeInteraction: {e}")
+        return
+
+    if emoji == "📥":
+        await handle_rip_logic(fake_interaction, url)
+    elif emoji == "📌":
+        await handle_save_logic(fake_interaction, url)
+    elif emoji == "❌":
+        await message.delete()
+    elif emoji == "🎧":
+        await mark_as_listened(fake_interaction, message)
+    elif emoji == "🔁":
+        await recommend_album(fake_interaction, message)
+
+
+
+@bot.event
+async def on_ready():
+    try:
+        bot.tree.clear_commands(guild=DEV_GUILD)
+        print("[INFO] Cleared existing guild commands")
+        bot.tree.copy_global_to(guild=DEV_GUILD)
+        await bot.tree.sync(guild=DEV_GUILD)
+        print(f"[INFO] Synced commands to dev guild {DEV_GUILD_ID}")
+    except Exception as e:
+        print(f"[WARN] Failed to sync commands: {e}")
+    print(f"[INFO] Logged in as {bot.user}")
+    print(f"[INFO] Using music folder: {MUSIC_FOLDER}")
+
+    global PLEX_MACHINE_ID
+    if PLEX_TOKEN and PLEX_URL:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{PLEX_URL}/?X-Plex-Token={PLEX_TOKEN}") as resp:
+                    if resp.status == 200:
+                        xml = await resp.text()
+                        match = re.search(r'machineIdentifier="([^"]+)"', xml)
+                        if match:
+                            PLEX_MACHINE_ID = match.group(1)
+                            print(f"[INFO] Found Plex machine ID: {PLEX_MACHINE_ID}")
+        except Exception as e:
+            print(f"[WARN] Could not fetch Plex machine ID: {e}")
+
+    if not scheduled_hotupdates.is_running():
+        scheduled_hotupdates.start()
+
+@bot.tree.command(name="testembed", description="Preview album embed from a source URL")
+@app_commands.describe(url="Link to Bandcamp, AOTY, Pitchfork, etc.")
+async def testembed(interaction: discord.Interaction, url: str):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    embed, view, _, _, _ = await build_album_embed(url)
+    await interaction.followup.send(embed=embed, view=view)
+
+
+@bot.tree.command(name="rip", description="Download album from any music source")
+@app_commands.describe(url="Music URL (Apple Music, Spotify, TIDAL, Bandcamp, blog reviews, etc.)")
+async def rip(interaction: discord.Interaction, url: str):
+    await interaction.response.defer(thinking=True)
+    await handle_rip_logic(interaction, url)
+
+
+@bot.tree.command(name="save", description="Save an album for later listening")
+@app_commands.describe(url="A link to Bandcamp, Pitchfork, AOTY, etc.")
+async def save(interaction: discord.Interaction, url: str):
+    is_fake = isinstance(interaction, FakeInteraction)
+
+    if not is_fake:
+        try:
+            await interaction.response.defer(thinking=True, ephemeral=True)
+        except discord.InteractionResponded:
+            pass  # Already responded
+
+    try:
+        await handle_save_logic(interaction, url)
+    except Exception as e:
+        print("[ERROR] /save failed:", e)
+        if not is_fake:
+            try:
+                await interaction.followup.send("❌ Failed to save the album.")
+            except:
+                pass
+        return
+
+    # ✅ Clean up the "thinking..." indicator
+    if not is_fake:
+        try:
+            await interaction.edit_original_response(content="✅ Saved.")
+            await asyncio.sleep(2)
+            await interaction.delete_original_response()
+        except Exception as e:
+            print("[WARN] Could not clean up original response:", e)
+
+
+@bot.tree.command(name="library", description="Search your Plex library for albums by artist or album name")
+@app_commands.describe(query="Artist or album name to search for")
+async def library(interaction: discord.Interaction, query: str):
+    await interaction.response.defer(thinking=True)
+
+    if not PLEX_TOKEN or not PLEX_URL:
+        await interaction.followup.send("❌ Plex integration is not configured.")
+        return
+
+    headers = {"X-Plex-Token": PLEX_TOKEN}
+    search_url = f"{PLEX_URL}/library/search?query={query}"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(search_url, headers=headers) as response:
+                if response.status != 200:
+                    await interaction.followup.send("❌ Failed to query Plex.")
+                    return
+                xml = await response.text()
+
+        root = ET.fromstring(xml)
+        results = []
+
+        for elem in root.findall(".//Directory") + root.findall(".//Video"):
+            if elem.attrib.get("type") != "album":
+                continue
+
+            title = elem.attrib.get("title", "")
+            artist = elem.attrib.get("parentTitle", "")
+            thumb = elem.attrib.get("thumb", "")
+            guid_raw = elem.attrib.get("guid", "")
+
+            combined = f"{artist} {title}"
+            score = fuzz.token_sort_ratio(query.lower(), combined.lower())
+
+            match = re.search(r"plex://album/([^?]+)", guid_raw)
+            if match:
+                guid = match.group(1)
+                plexamp_url = f"https://listen.plex.tv/album/{guid}?source={PLEX_MACHINE_ID}"
+                results.append({
+                    "title": title,
+                    "artist": artist,
+                    "thumb": thumb,
+                    "url": plexamp_url,
+                    "score": score
+                })
+
+        if not results:
+            await interaction.followup.send("❌ No albums found.")
+            return
+
+        # Sort by fuzzy score, then show top 5
+        top_matches = sorted(results, key=lambda r: r["score"], reverse=True)[:5]
+
+        for r in top_matches:
+            embed = discord.Embed(
+                title=r["title"],
+                description=f"**Artist:** {r['artist']}",
+                color=discord.Color.blue()
+            )
+            if r["thumb"]:
+                embed.set_thumbnail(url=f"{PLEX_URL}{r['thumb']}?X-Plex-Token={PLEX_TOKEN}")
+
+            view = discord.ui.View()
+            view.add_item(discord.ui.Button(label="Plexamp", url=r["url"]))
+            await interaction.followup.send(embed=embed, view=view)
+
+    except Exception as e:
+        print("[ERROR /library]", e)
+        await interaction.followup.send("❌ Error occurred while searching your Plex library.")
+
+
+@bot.tree.command(name="ripbulk", description="Batch download albums from streaming URLs or a .txt file")
+@app_commands.describe(links="Paste multiple streaming links separated by spaces or newlines", file="Optional .txt file with links")
+async def ripbulk(interaction: discord.Interaction, links: str = None, file: discord.Attachment = None):
+    await interaction.response.defer(thinking=True)
+    urls = []
+
+    if file and file.filename.endswith(".txt"):
+        try:
+            content = await file.read()
+            lines = content.decode().splitlines()
+            urls.extend([line.strip() for line in lines if line.strip()])
+        except Exception:
+            await interaction.followup.send("❌ Failed to read the uploaded file.")
+            return
+
+    if links:
+        urls.extend([u.strip() for u in links.splitlines() if u.strip()])
+
+    if not urls:
+        await interaction.followup.send("❌ No valid URLs provided.")
+        return
+
+    urls = list(set(urls))
+    successful = []
+    failed = []
+
+    for url in urls:
+        try:
+            apple_url = url if "music.apple.com" in url else await fetch_apple_url(url)
+            if not apple_url:
+                failed.append(url)
+                continue
+
+            returncode, output = await run_gamdl(apple_url)
+            if returncode == 0:
+                successful.append(url)
+                # Run beets import for each successful download
+                await run_beet_import()
+            else:
+                failed.append(f"{url} (exit {returncode})")
+
+        except Exception as e:
+            logger.error("[ripbulk] %s", e)
+            failed.append(url)
+
+    embed = discord.Embed(
+        title="📦 Bulk Download Summary",
+        description=f"✅ **{len(successful)} succeeded**\n❌ **{len(failed)} failed**",
+        color=discord.Color.green() if not failed else discord.Color.orange()
+    )
+
+    if failed:
+        embed.add_field(name="Failed URLs", value="\n".join(failed[:5]) + ("\n..." if len(failed) > 5 else ""), inline=False)
+
+    await interaction.followup.send(embed=embed)
+
+
+class RecommendDropdown(discord.ui.View):
+    def __init__(self, author_id, embed, url, guild):
+        super().__init__(timeout=30)
+        self.author_id = author_id
+        self.embed = embed
+        self.guild = guild
+        self.url = url
+        self.message = None  # Will hold the prompt message so we can delete it
+
+        music_town = discord.utils.get(guild.text_channels, name="music-town")
+        members = []
+
+        if music_town:
+            for member in guild.members:
+                perms = music_town.permissions_for(member)
+                print(f"[DEBUG] Member: {member.display_name}, Bot: {member.bot}, CanRead: {perms.read_messages}")
+                if not member.bot and perms.read_messages:
+                    members.append(member)
+
+        options = [
+            discord.SelectOption(label=member.display_name, value=str(member.id))
+            for member in members
+        ][:25]
+
+        if options:
+            self.select = discord.ui.Select(
+                placeholder="Choose people to recommend this album to...",
+                options=options,
+                min_values=1,
+                max_values=len(options)  # Allow selecting multiple users
+            )
+
+            self.select.callback = self.select_callback
+            self.add_item(self.select)
+        else:
+            print("[WARN] RecommendDropdown: No valid members found.")
+
+    async def select_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ You're not allowed to use this menu.", ephemeral=True)
+            return
+
+        selected_ids = [int(uid) for uid in self.select.values]
+        confirmed_mentions = []
+
+        for user_id in selected_ids:
+            user = self.guild.get_member(user_id)
+            if not user:
+                continue
+
+            rec_channel_name = f"listen-later-{user.name.lower().replace(' ', '-')}"
+            rec_channel = discord.utils.get(self.guild.text_channels, name=rec_channel_name)
+
+            if not rec_channel:
+                author = self.guild.get_member(self.author_id)
+                recipient = self.guild.get_member(user.id)
+
+                overwrites = {
+                    self.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                    self.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                }
+
+                if recipient:
+                    overwrites[recipient] = discord.PermissionOverwrite(read_messages=True, send_messages=False)
+
+                rec_channel = await self.guild.create_text_channel(rec_channel_name, overwrites=overwrites)
+
+            # Build a fresh embed so streaming buttons are retained
+            embed, view, _, _, _ = await build_album_embed(self.url)
+
+            # Add "Recommended by" footer if recommender ≠ recipient
+            if user.id != self.author_id:
+                embed.set_footer(text=f"💡 Recommended by {interaction.user.display_name}")
+
+            await post_album_message(
+                rec_channel,
+                embed,
+                self.url,
+                user.id,
+                embed.title or "Unknown Album",
+                "Unknown Artist",
+                links=None,
+                view=view,
+                extra_reactions=["📥", "🎧", "🔁", "❌"]
+            )
+
+            confirmed_mentions.append(user.mention)
+
+        # Show ephemeral confirmation to recommender
+        if confirmed_mentions:
+            try:
+                await interaction.response.send_message(
+                    f"✅ Recommended to {', '.join(confirmed_mentions)}", ephemeral=True
+                )
+            except discord.errors.NotFound:
+                print("[WARN] RecommendDropdown interaction expired — skipping confirmation message.")
+        else:
+            await interaction.response.send_message("❌ No valid users were selected.", ephemeral=True)
+
+        # 🧹 Clean up prompt and dropdown view
+        try:
+            if self.message:
+                await self.message.delete()
+        except Exception as e:
+            print("[WARN] Could not delete recommend prompt:", e)
+
+        try:
+            await interaction.message.edit(content="✅ Recommendation sent.", view=None)
+        except Exception as e:
+            print("[WARN] Could not clear dropdown view:", e)
+
+        self.stop()
+
+
+
+class FakeInteraction:
+    def __init__(self, message, user=None, artist=None, album=None, channel=None, url=None):
+        self.message = message
+        self.user = user or message.author
+        self.channel = channel or message.channel
+        self.guild = message.guild
+        self.extras = {"artist": artist, "album": album, "url": url}
+
+    async def defer(self, thinking=False, ephemeral=False):
+        pass
+
+    @property
+    def followup(self):
+        return self
+
+    async def send(self, content=None, embed=None, file=None, view=None):
+        try:
+            msg = await self.channel.send(content=content, embed=embed, file=file, view=view)
+            return msg
+        except Exception as e:
+            print("[WARN FakeInteraction.send failed]:", e)
+
+
+    @property
+    def response(self):
+        return self
+
+    @property
+    def url(self):
+        return self._url
+
+async def post_album_message(channel, embed, url, user_id, artist, album, links=None, view=None, extra_reactions=None, file=None):
+    try:
+        print(f"[DEBUG] Sending embed to #{channel.name}: {embed.title}")
+        msg = await channel.send(embed=embed, view=view, file=file)
+
+        # Save for future reference
+        saved_embeds[msg.id] = {"url": url, "user_id": user_id, "artist": artist, "album": album}
+
+        # Add reactions if specified
+        if extra_reactions:
+            for reaction in extra_reactions:
+                await msg.add_reaction(reaction)
+
+        return msg
+
+    except Exception as e:
+        print(f"[ERROR] post_album_message failed in #{channel.name}: {e}")
+        return None
+
+    
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    if message.channel.name != "music-town":
+        return
+
+    url_match = re.search(r"(https?://\S+)", message.content)
+    if not url_match:
+        return
+
+    url = url_match.group(1)
+    print(f"[AUTO-SAVE] Detected link: {url}")
+
+    # 🚫 Skip non-music domains
+    ignored_domains = [
+        "tenor.com", "giphy.com", "imgur.com", "youtube.com", "youtu.be",
+        "twitter.com", "x.com", "reddit.com", "tiktok.com"
+    ]
+    if any(domain in url for domain in ignored_domains):
+        print("[AUTO-SAVE] Skipping non-music-related link.")
+        return
+
+    fake_interaction = FakeInteraction(message=message, user=message.author)
+
+    try:
+        print("[AUTO-SAVE] Calling handle_save_logic...")
+        await handle_save_logic(fake_interaction, url, mirror_only=True)
+        print("[AUTO-SAVE] handle_save_logic completed.")
+        await message.delete()  # Optional
+    except Exception as e:
+        print(f"[AUTO-SAVE ERROR]: {type(e).__name__}: {e}")
+
+
+async def handle_save_logic(interaction, url: str, mirror_only=False):
+    try:
+        user = interaction.user
+        guild = interaction.guild
+        
+        metadata = await extract_metadata(url)
+        if not metadata or not metadata.get("artist") or not metadata.get("album"):
+            print("[WARN] Metadata extraction failed or incomplete")
+            return
+
+        # Fetch metadata early so we get artist/album
+        metadata = await extract_metadata(url)
+        artist = metadata["artist"]
+        album = metadata["album"]
+
+        plex_url = await get_plex_album_guid(artist, album)
+        download_available = not plex_url
+
+        # Now pass the resolved Plex URL
+        embed, view, artist, album, links = await build_album_embed(url, plex_url=plex_url)
+
+        if mirror_only:
+            # === Auto-save or 📌 reaction → post to #music-town ===
+            music_town = discord.utils.get(guild.text_channels, name="music-town")
+            if music_town:
+                reactions = []
+                if download_available:
+                    reactions.append("📥")
+                reactions.extend(["📌", "🔁", "❌"])
+                await post_album_message(music_town, embed, url, user.id, artist, album, links=links, view=view, extra_reactions=reactions)
+
+        else:
+            # === /save or manual 📌 → post to user's private listen-later channel ===
+            channel_name = f"listen-later-{user.name.lower().replace(' ', '-')}"
+
+            private = discord.utils.get(guild.text_channels, name=channel_name)
+            if not private:
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                    user: discord.PermissionOverwrite(read_messages=True, send_messages=False),
+                    guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                }
+                private = await guild.create_text_channel(channel_name, overwrites=overwrites)
+                print(f"[INFO] Created new channel: {channel_name}")
+
+            reactions = []
+            if download_available:
+                reactions.append("📥")
+            reactions.extend(["🎧", "🔁", "❌"])
+            await post_album_message(private, embed, url, user.id, artist, album, links=links, view=view, extra_reactions=reactions)
+
+    except Exception as e:
+        print("[ERROR] handle_save_logic failed:", e)
+        try:
+            await interaction.followup.send("❌ Failed to save the album.", ephemeral=True)
+        except:
+            pass
+
+
+async def post_hotupdates(channel: discord.TextChannel) -> bool:
+    """Post trending albums to the given channel."""
+    aoty, pitchfork, quietus, brooklyn, bandcamp = await asyncio.gather(
+        fetch_aoty_trending(10),
+        fetch_pitchfork_best_new(3),
+        fetch_quietus_aotw(3),
+        fetch_brooklynvegan_notable(),
+        fetch_bandcamp_aotd(7),
+    )
+
+    if not aoty and not bandcamp and not pitchfork and not brooklyn and not quietus:
+        return False
+
+    header = datetime.datetime.now().strftime("%A, %m - %d")
+    await channel.send(f"**{header}**")
+
+    lists = [aoty, pitchfork, quietus, brooklyn, bandcamp]
+    for album in [al for sub in lists for al in sub]:
+        try:
+            meta = await extract_metadata(album["url"], album.get("artist"), album.get("album"))
+            album["links"] = meta.get("links", {})
+            if meta.get("cover_url"):
+                album["cover"] = meta["cover_url"]
+        except Exception as e:
+            print("[WARN hotupdates links]", e)
+            album["links"] = {}
+
+    sources = [
+        ("Album of the Year", aoty),
+        ("Pitchfork", pitchfork),
+        ("The Quietus", quietus),
+        ("BrooklynVegan", brooklyn),
+        ("Bandcamp", bandcamp),
+    ]
+
+    source_colors = {
+        "Album of the Year": discord.Color.light_grey(),
+        "Pitchfork": discord.Color.from_rgb(228, 5, 3),
+        "Bandcamp": discord.Color.from_rgb(0, 171, 189),
+        "BrooklynVegan": discord.Color.from_rgb(0, 255, 0),
+        "The Quietus": discord.Color.from_rgb(200, 150, 0),
+    }
+
+    for name, albums in sources:
+        if not albums:
+            continue
+        lines = []
+        for i, album in enumerate(albums, 1):
+            line = f"{i}. **{album['artist']}** – **[{album['album']}]({album['url']})**"
+            lines.append(line)
+            extras = []
+            if "appleMusic" in album.get("links", {}):
+                extras.append(f"[Apple Music]({album['links']['appleMusic']['url']})")
+            if "bandcamp" in album.get("links", {}):
+                extras.append(f"[Bandcamp]({album['links']['bandcamp']['url']})")
+            if extras:
+                lines.append(" / ".join(extras))
+
+        embed = discord.Embed(
+            title=name,
+            description="\n".join(lines),
+            color=source_colors.get(name, discord.Color.orange()),
+        )
+        embed.set_author(name="🔥 Hot Updates")
+
+        collage = await create_collage([a.get("cover") for a in albums if a.get("cover")])
+        file = None
+        if collage:
+            embed.set_thumbnail(url="attachment://collage.jpg")
+            file = discord.File(collage, filename="collage.jpg")
+
+        await channel.send(embed=embed, file=file)
+
+    return True
+
+
+@bot.tree.command(name="hotupdates", description="Post trending albums to #hot-updates")
+async def hotupdates(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    channel = discord.utils.get(interaction.guild.text_channels, name="hot-updates")
+    if not channel:
+        await interaction.followup.send("❌ Channel #hot-updates not found.", ephemeral=True)
+        return
+
+    success = await post_hotupdates(channel)
+    if success:
+        await interaction.followup.send("✅ Posted hot updates.", ephemeral=True)
+    else:
+        await interaction.followup.send("❌ Failed to fetch trending albums.", ephemeral=True)
+
+
+@bot.tree.command(name="sync", description="Sync slash commands to this server")
+@commands.is_owner()
+async def sync_commands(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    bot.tree.copy_global_to(guild=DEV_GUILD)
+    await bot.tree.sync(guild=DEV_GUILD)
+    await interaction.followup.send("✅ Commands synced.", ephemeral=True)
+
+
+@tasks.loop(time=datetime.time(hour=17, minute=30))
+async def scheduled_hotupdates():
+    now = datetime.datetime.now()
+    if now.weekday() in (2, 4):  # Wednesday and Friday
+        guild = bot.get_guild(DEV_GUILD_ID)
+        if guild:
+            channel = discord.utils.get(guild.text_channels, name="hot-updates")
+            if channel:
+                await post_hotupdates(channel)
+
+
+@scheduled_hotupdates.before_loop
+async def before_scheduled_hotupdates():
+    await bot.wait_until_ready()
+
+
+# Add missing functions for reaction handling
+async def mark_as_listened(interaction, message):
+    """Mark an album as listened"""
+    try:
+        embed = message.embeds[0]
+        # Create a new embed with updated status
+        new_embed = discord.Embed(
+            title=embed.title,
+            description=embed.description + "\n\n🎧 *Listened*",
+            color=discord.Color.green()
+        )
+        if embed.thumbnail:
+            new_embed.set_thumbnail(url=embed.thumbnail.url)
+        
+        await message.edit(embed=new_embed)
+        
+    except Exception as e:
+        print(f"[ERROR] mark_as_listened failed: {e}")
+
+
+async def recommend_album(interaction, message):
+    """Show recommendation dropdown"""
+    try:
+        if not message.embeds:
+            return
+            
+        embed = message.embeds[0]
+        url = saved_embeds.get(message.id, {}).get("url", "")
+        
+        if not url:
+            await interaction.channel.send("❌ Could not find album URL for recommendation.")
+            return
+            
+        dropdown = RecommendDropdown(interaction.user.id, embed, url, interaction.guild)
+        prompt_msg = await interaction.channel.send("🔁 **Who would you like to recommend this album to?**", view=dropdown)
+        dropdown.message = prompt_msg
+        
+    except Exception as e:
+        print(f"[ERROR] recommend_album failed: {e}")
+
+
+if __name__ == "__main__":
+    bot.run(TOKEN)
