@@ -138,33 +138,29 @@ async def run_gamdl(
     remux_mode: str = "mp4box",
     output_path: str = "/downloads"
 ) -> tuple[int, str]:
-    """Run gamdl with fallback codec options"""
-    codecs = ["alac", "aac-legacy", "aac", "aac-he-legacy", "aac-he"]
+    """Run gamdl with AAC-legacy only (your proven working method)"""
+    logger.info(f"🎧 Using AAC-legacy codec (proven working method)")
     
-    for codec in codecs:
-        logger.info(f"🎧 Trying codec: {codec}")
-        
-        process = await asyncio.create_subprocess_exec(
-            "gamdl",
-            "--cookies-path", cookies_path,
-            "--codec-song", codec,
-            "--remux-mode", remux_mode,
-            "--output-path", output_path,
-            url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT
-        )
-        stdout, _ = await process.communicate()
-        output = stdout.decode("utf-8").strip()
-        
-        if process.returncode == 0:
-            logger.info(f"✅ Download succeeded with codec: {codec}")
-            return process.returncode, output
-        else:
-            logger.warning(f"❌ Failed with codec {codec}: {process.returncode}")
+    process = await asyncio.create_subprocess_exec(
+        "gamdl",
+        "--cookies-path", cookies_path,
+        "--codec-song", codec,
+        "--remux-mode", remux_mode,
+        "--output-path", output_path,
+        url,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT
+    )
+    stdout, _ = await process.communicate()
+    output = stdout.decode("utf-8").strip()
     
-    logger.error("❌ All codec attempts failed")
-    return 1, "All codec attempts failed"
+    if process.returncode == 0:
+        logger.info(f"✅ Download succeeded with AAC-legacy")
+    else:
+        logger.warning(f"❌ Failed with AAC-legacy: {process.returncode}")
+        logger.warning(f"Output: {output}")
+    
+    return process.returncode, output
 
 
 async def download_album(interaction, url):
@@ -184,7 +180,7 @@ async def download_album(interaction, url):
     else:
         await interaction.channel.send(f"📥 Downloading **{artist} - {album}**...")
 
-    # Start download process with GAMDL
+    # Start download process with GAMDL (AAC-legacy only)
     returncode, output = await run_gamdl(url)
 
     if returncode != 0:
@@ -1048,7 +1044,6 @@ class RecommendDropdown(discord.ui.View):
         self.stop()
 
 
-
 class FakeInteraction:
     def __init__(self, message, user=None, artist=None, album=None, channel=None, url=None):
         self.message = message
@@ -1071,7 +1066,6 @@ class FakeInteraction:
         except Exception as e:
             print("[WARN FakeInteraction.send failed]:", e)
 
-
     @property
     def response(self):
         return self
@@ -1079,6 +1073,7 @@ class FakeInteraction:
     @property
     def url(self):
         return self._url
+
 
 async def post_album_message(channel, embed, url, user_id, artist, album, links=None, view=None, extra_reactions=None, file=None):
     try:
