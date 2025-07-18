@@ -13,10 +13,11 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install mp4decrypt from Bento4
+# Install mp4decrypt from Bento4 and MP4Box
 RUN curl -L "https://www.bok.net/Bento4/binaries/Bento4-SDK-1-6-0-639.x86_64-unknown-linux.zip" -o /tmp/bento4.zip && \
     unzip -q /tmp/bento4.zip -d /tmp && \
     install -m 0755 /tmp/Bento4-SDK-1-6-0-639.x86_64-unknown-linux/bin/mp4decrypt /usr/local/bin/mp4decrypt && \
+    install -m 0755 /tmp/Bento4-SDK-1-6-0-639.x86_64-unknown-linux/bin/mp4box /usr/local/bin/MP4Box && \
     rm -rf /tmp/bento4.zip /tmp/Bento4-SDK-1-6-0-639.x86_64-unknown-linux
 
 # Install gamdl
@@ -26,7 +27,8 @@ RUN pip install gamdl
 RUN pip install beets[web] \
     beets-extrafiles \
     requests \
-    beautifulsoup4
+    beautifulsoup4 \
+    pylast
 
 # Set working directory
 WORKDIR /app
