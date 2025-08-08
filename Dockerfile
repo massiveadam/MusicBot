@@ -21,20 +21,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Install MP4Box via package manager (simpler and more reliable)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gpac \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+# Install MP4Box from static binary (more reliable than package manager)
+RUN curl -L https://github.com/gpac/gpac/releases/download/v2.4.0/gpac-2.4.0-rev0-gc5b5ef2c7-master-linux64-static.tar.gz -o gpac.tar.gz \
+    && tar -xzf gpac.tar.gz \
+    && install -m 0755 gpac-2.4.0-rev0-gc5b5ef2c7-master-linux64-static/MP4Box /usr/local/bin/MP4Box \
+    && install -m 0755 gpac-2.4.0-rev0-gc5b5ef2c7-master-linux64-static/mp4box /usr/local/bin/mp4box \
+    && rm -rf gpac.tar.gz gpac-2.4.0-rev0-gc5b5ef2c7-master-linux64-static \
+    && echo "MP4Box installed successfully"
 
-# Install mp4decrypt (Bento4) - simplified with better error handling
+# Install mp4decrypt (Bento4)
 RUN curl -L https://www.bok.net/Bento4/binaries/Bento4-SDK-1-6-0-639.x86_64-unknown-linux.zip -o bento4.zip \
     && unzip -q bento4.zip Bento4-SDK-1-6-0-639.x86_64-unknown-linux/bin/mp4decrypt \
     && install -m 0755 Bento4-SDK-1-6-0-639.x86_64-unknown-linux/bin/mp4decrypt /usr/local/bin/mp4decrypt \
-    && rm -rf Bento4-SDK-1-6-0-639.x86_64-unknown-linux bento4.zip
-
-# Create MP4Box symlink if needed
-RUN which MP4Box || which mp4box || ln -sf /usr/bin/MP4Box /usr/local/bin/mp4box 2>/dev/null || echo "MP4Box tools installed"
+    && rm -rf Bento4-SDK-1-6-0-639.x86_64-unknown-linux bento4.zip \
+    && echo "MP4 decryption tools installed"
 
 # Set working directory
 WORKDIR /app
