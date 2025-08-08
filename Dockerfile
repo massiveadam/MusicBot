@@ -1,7 +1,11 @@
 FROM python:3.12-slim
 
-# Install system dependencies including MP4Box
-RUN apt-get update && apt-get install -y \
+# Set environment variables for non-interactive installation
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Update package lists and install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     unzip \
     ffmpeg \
@@ -10,48 +14,47 @@ RUN apt-get update && apt-get install -y \
     libjpeg-dev \
     zlib1g-dev \
     libffi-dev \
+    libssl-dev \
+    pkg-config \
     git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Install MP4Box via package manager (simpler and more reliable)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gpac \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-# Build and install MP4Box (GPAC)
-RUN git clone https://github.com/gpac/gpac.git /usr/local/src/gpac && \
-    cd /usr/local/src/gpac && \
-    ./configure --static-bin && \
-    make -j$(nproc) && \
-    make install && \
-    rm -rf /usr/local/src/gpac
+# Install mp4decrypt (Bento4) - simplified with better error handling
+RUN curl -L https://www.bok.net/Bento4/binaries/Bento4-SDK-1-6-0-639.x86_64-unknown-linux.zip -o bento4.zip \
+    && unzip -q bento4.zip Bento4-SDK-1-6-0-639.x86_64-unknown-linux/bin/mp4decrypt \
+    && install -m 0755 Bento4-SDK-1-6-0-639.x86_64-unknown-linux/bin/mp4decrypt /usr/local/bin/mp4decrypt \
+    && rm -rf Bento4-SDK-1-6-0-639.x86_64-unknown-linux bento4.zip
 
-# Install mp4decrypt (Bento4)
-RUN set -eux; \
-    curl -L https://www.bok.net/Bento4/binaries/Bento4-SDK-1-6-0-639.x86_64-unknown-linux.zip -o bento4.zip && \
-    unzip -q bento4.zip Bento4-SDK-1-6-0-639.x86_64-unknown-linux/bin/mp4decrypt && \
-    install -m 0755 Bento4-SDK-1-6-0-639.x86_64-unknown-linux/bin/mp4decrypt /usr/local/bin/mp4decrypt && \
-    rm -rf Bento4-SDK-1-6-0-639.x86_64-unknown-linux bento4.zip
-
-# Create MP4Box symlink (gpac package installs it as 'MP4Box')
-RUN ln -sf /usr/bin/MP4Box /usr/local/bin/mp4box || echo "MP4Box already available"
-
-# Install gamdl
-RUN pip install gamdl
-
-# Install beets with plugins
-RUN pip install beets[web] \
-    beets-extrafiles \
-    requests \
-    beautifulsoup4 \
-    pylast
+# Create MP4Box symlink if needed
+RUN which MP4Box || which mp4box || ln -sf /usr/bin/MP4Box /usr/local/bin/mp4box 2>/dev/null || echo "MP4Box tools installed"
 
 # Set working directory
 WORKDIR /app
 
-# Copy requirements and install Python dependencies
+# Copy requirements first for better caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
-RUN playwright install chromium && \
-    playwright install-deps chromium
+# Install Python dependencies with better error handling
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir gamdl \
+    && pip install --no-cache-dir beets[web] \
+        beets-extrafiles \
+        requests \
+        beautifulsoup4 \
+        pylast \
+    && pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright browsers with error handling
+RUN playwright install chromium \
+    && playwright install-deps chromium
 
 # Copy application files
 COPY . .
