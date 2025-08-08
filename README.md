@@ -47,13 +47,29 @@ docker-compose up --build -d
 
 ### Environment Variables
 
-Copy `.env.example` to `.env` and configure:
+Create a `.env` file and configure:
 
 ```env
+# Required
 DISCORD_TOKEN=your_discord_bot_token_here
-PLEX_TOKEN=your_plex_token_here  # Optional
-PLEX_URL=http://your-plex-server:32400  # Optional
-BEETS_WEB_ENABLED=true  # Optional
+DEV_GUILD_ID=your_server_id_here
+
+# Plex Integration (Optional)
+PLEX_TOKEN=your_plex_token_here
+PLEX_URL=http://your-plex-server:32400
+
+# File Paths (Optional - defaults provided)
+MUSIC_FOLDER=/music
+DOWNLOADS_FOLDER=/downloads
+COOKIES_PATH=/app/cookies.txt
+
+# Download Configuration (Optional)
+GAMDL_CODEC=aac-legacy
+DOWNLOAD_TIMEOUT=300
+RETRY_ATTEMPTS=3
+
+# Beets Web Interface (Optional)
+BEETS_WEB_ENABLED=true
 ```
 
 ### Apple Music Cookies
@@ -79,6 +95,7 @@ volumes:
 - `/save <url>` - Save album for later listening
 - `/library <query>` - Search your Plex library
 - `/ripbulk <links>` - Batch download multiple albums
+- `/import [autotag] [path]` - **NEW:** Manually import files with optional auto-tagging
 - `/hotupdates` - Post trending albums
 - `/testembed <url>` - Preview album embed
 
@@ -101,6 +118,18 @@ Automatically posts trending albums on:
 ### Auto-Save Links
 Any music links posted in `#music-town` are automatically saved with reaction controls.
 
+### Manual Import Options
+**For files you manually place in `/downloads`:**
+- `/import` - Quick import without auto-tagging (moves files as-is)
+- `/import autotag:True` - Full import with auto-tagging for metadata correction
+- `/import path:/custom/folder` - Import from a specific directory
+- `/import autotag:True path:/custom/folder` - Full auto-tag import from custom path
+
+**Use Cases:**
+- Downloaded files from other sources
+- Files with incorrect/missing metadata
+- Batch processing of existing music collections
+
 ## 🏗️ Architecture
 
 ### Download Process
@@ -111,7 +140,12 @@ Any music links posted in `#music-town` are automatically saved with reaction co
 5. **Notification**: Discord embed with Plexamp link
 
 ### Beets Configuration
-Automatic features:
+**Flexible Import Modes:**
+- **Auto Mode (Default):** Files from `/rip` command use `-A` flag (no auto-tagging, just move files)
+- **Manual Mode:** Use `/import autotag:True` for full auto-tagging and metadata correction
+- **Custom Path:** Import from any directory with `/import path:/custom/path`
+
+**Automatic Features:**
 - ✅ ReplayGain analysis
 - ✅ Album art embedding
 - ✅ Genre tagging

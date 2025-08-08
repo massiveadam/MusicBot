@@ -11,12 +11,14 @@ import:
   write: yes           # Write tags if we run anything manually (safe here)
   copy: no
   delete: no
-  autotag: no          # ❗ Explicitly disable metadata changes
-  timid: yes           # Prevent any accidental overwrites
+  autotag: yes         # Enable auto-tagging by default (can be overridden with -A)
+  timid: no            # Allow auto-tagging when enabled
   resume: ask
   quiet_fallback: skip
   incremental: no
   log: /app/.beets/import.log
+  detail: yes          # Show more import details
+  group_albums: yes    # Group tracks into albums automatically
 
 paths:
     default: $albumartist/$album%aunique{}/$track $title

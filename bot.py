@@ -23,15 +23,34 @@ import math
 import html
 import datetime
 import logging
+import urllib.parse
 
-TOKEN = os.getenv("DISCORD_TOKEN")
-MUSIC_FOLDER = "/music"
-DOWNLOADS_FOLDER = "/downloads"
-DEV_GUILD_ID = 1036854855844757505
-DEV_GUILD = discord.Object(id=DEV_GUILD_ID)
-PLEX_TOKEN = os.getenv("PLEX_TOKEN")
-PLEX_URL = os.getenv("PLEX_URL")
-PLEX_MACHINE_ID = None
+# Configuration management
+class Config:
+    """Configuration class for the Discord bot."""
+    
+    def __init__(self):
+        self.TOKEN = os.getenv("DISCORD_TOKEN")
+        self.MUSIC_FOLDER = os.getenv("MUSIC_FOLDER", "/music")
+        self.DOWNLOADS_FOLDER = os.getenv("DOWNLOADS_FOLDER", "/downloads")
+        self.DEV_GUILD_ID = int(os.getenv("DEV_GUILD_ID", "1036854855844757505"))
+        self.PLEX_TOKEN = os.getenv("PLEX_TOKEN")
+        self.PLEX_URL = os.getenv("PLEX_URL")
+        self.PLEX_MACHINE_ID = None
+        self.GAMDL_CODEC = os.getenv("GAMDL_CODEC", "aac-legacy")
+        self.COOKIES_PATH = os.getenv("COOKIES_PATH", "/app/cookies.txt")
+        self.DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "300"))
+        self.RETRY_ATTEMPTS = int(os.getenv("RETRY_ATTEMPTS", "3"))
+        
+        # Validate critical configuration
+        if not self.TOKEN:
+            raise ValueError("DISCORD_TOKEN environment variable is required")
+            
+    @property
+    def DEV_GUILD(self):
+        return discord.Object(id=self.DEV_GUILD_ID)
+
+config = Config()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +63,29 @@ intents.message_content = True  # Required for reading mentions in messages
 intents.members = True  # ✅ add this line
 saved_embeds = {}  # message_id: { "url": str, "user_id": int }
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+def validate_url(url: str) -> bool:
+    """Validate if the provided string is a valid URL."""
+    try:
+        result = urllib.parse.urlparse(url)
+        return all([result.scheme, result.netloc])
+    except Exception:
+        return False
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize a string to be safe for use as a filename."""
+    # Remove or replace invalid characters
+    invalid_chars = '<>:"/\\|?*'
+    for char in invalid_chars:
+        filename = filename.replace(char, '_')
+    return filename.strip()
+
+
+def sanitize_query(query: str) -> str:
+    """Sanitize search query for safe use in URLs."""
+    return urllib.parse.quote_plus(query.strip())
 
 
 async def handle_rip_logic(interaction, url: str):
@@ -75,7 +117,7 @@ async def handle_rip_logic(interaction, url: str):
 
             apple_url = await fetch_apple_url(preferred_link)
         except Exception as e:
-            print("[ERROR handle_rip_logic metadata fallback]", e)
+            logger.error(f"Failed to extract metadata or resolve streaming URL for {url}: {e}")
             await interaction.followup.send("❌ Failed to extract metadata or resolve streaming URL.")
             return
 
@@ -106,12 +148,32 @@ async def fetch_apple_url(odesli_url):
             return data.get("linksByPlatform", {}).get("appleMusic", {}).get("url")
 
 
-async def run_beet_import():
-    """Import downloads using local beets installation."""
+async def run_beet_import(use_autotag: bool = False, path: str = None):
+    """Import downloads using local beets installation.
+    
+    Args:
+        use_autotag: If False, uses -A flag to skip auto-tagging. If True, enables auto-tagging.
+        path: Custom path to import from. Defaults to DOWNLOADS_FOLDER.
+    """
+    import_path = path or config.DOWNLOADS_FOLDER
+    
     try:
-        # Run beets import command directly
+        # Build command arguments
+        cmd_args = ["beet", "import"]
+        
+        if not use_autotag:
+            cmd_args.append("-A")  # Skip auto-tagging, just move files
+            logger.info("Running beets import with auto-tagging disabled (-A flag)")
+        else:
+            logger.info("Running beets import with auto-tagging enabled")
+            # Add flags for better auto-tagging experience
+            cmd_args.extend(["-q", "--noninteractive"])  # Quiet, non-interactive mode
+        
+        cmd_args.append(import_path)
+        
+        # Run beets import command
         process = await asyncio.create_subprocess_exec(
-            "beet", "import", "-A", DOWNLOADS_FOLDER,
+            *cmd_args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -133,13 +195,17 @@ async def run_beet_import():
 
 async def run_gamdl(
     url: str,
-    cookies_path: str = "/app/cookies.txt",
-    codec: str = "aac-legacy",
+    cookies_path: str = None,
+    codec: str = None,
     remux_mode: str = "mp4box",
-    output_path: str = "/downloads"
+    output_path: str = None
 ) -> tuple[int, str]:
     """Run gamdl with AAC-legacy only (your proven working method)"""
-    logger.info(f"🎧 Using AAC-legacy codec (proven working method)")
+    cookies_path = cookies_path or config.COOKIES_PATH
+    codec = codec or config.GAMDL_CODEC
+    output_path = output_path or config.DOWNLOADS_FOLDER
+    
+    logger.info(f"🎧 Using {codec} codec")
     
     process = await asyncio.create_subprocess_exec(
         "gamdl",
@@ -169,10 +235,12 @@ async def download_album(interaction, url):
 
     try:
         metadata = await extract_metadata(url)
-        artist = metadata["artist"]
-        album = metadata["album"]
+        artist = metadata.get("artist", "Unknown Artist")
+        album = metadata.get("album", "Unknown Album")
     except Exception as e:
-        print(f"[WARN] Could not extract metadata from URL: {e}")
+        logger.warning(f"Could not extract metadata from URL {url}: {e}")
+        artist = "Unknown Artist"
+        album = "Unknown Album"
 
     # Send download message based on interaction type
     if hasattr(interaction, "response") and hasattr(interaction.response, "send_message"):
@@ -237,17 +305,8 @@ async def download_album(interaction, url):
         await music_town.send(embed=embed, view=view)
 
 
-def get_latest_album_dir(base_path):
-    try:
-        dirs = [os.path.join(base_path, d) for d in os.listdir(base_path)]
-        dirs = [d for d in dirs if os.path.isdir(d)]
-        latest = max(dirs, key=os.path.getctime)
-        return latest
-    except Exception:
-        return None
-
-
 def extract_metadata_from_path(path):
+    """Extract artist and album from file path."""
     parts = Path(path).parts
     # expected: /downloads/Artist/Album
     if len(parts) >= 3:
@@ -256,17 +315,20 @@ def extract_metadata_from_path(path):
 
 
 def extract_cover_art_thumbnail(path):
+    """Find cover art file in the given directory."""
     try:
         for root, _, files in os.walk(path):
             for file in files:
                 if file.lower().endswith((".jpg", ".jpeg", ".png")) and "cover" in file.lower():
                     return os.path.join(root, file)
         return None
-    except:
+    except Exception as e:
+        logger.warning(f"Failed to find cover art in {path}: {e}")
         return None
 
 
 async def wait_for_album_in_music(artist, album_title, timeout=60):
+    """Wait for album to appear in music directory."""
     target = f"/music/{artist}/{album_title}"
     for _ in range(timeout):
         if os.path.exists(target):
@@ -288,11 +350,16 @@ async def wait_for_album_path(base_path, artist, album, timeout=200):
 
 
 def get_latest_album_dir(base_path: Path) -> Path | None:
-    dirs = sorted(base_path.rglob("*"), key=os.path.getmtime, reverse=True)
-    for d in dirs:
-        if d.is_dir() and any(f.suffix in [".flac", ".mp3"] for f in d.glob("*")):
-            return d
-    return None
+    """Find the most recently modified directory containing music files."""
+    try:
+        dirs = sorted(base_path.rglob("*"), key=os.path.getmtime, reverse=True)
+        for d in dirs:
+            if d.is_dir() and any(f.suffix in [".flac", ".mp3", ".m4a"] for f in d.glob("*")):
+                return d
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to find latest album directory in {base_path}: {e}")
+        return None
 
 
 def extract_file_metadata(album_dir: Path):
@@ -330,15 +397,15 @@ def normalize(text):
 
 
 async def get_plex_album_guid(artist: str, album: str) -> str | None:
-    if not PLEX_TOKEN or not PLEX_URL:
+    if not config.PLEX_TOKEN or not config.PLEX_URL:
         return None
 
-    headers = {"X-Plex-Token": PLEX_TOKEN}
+    headers = {"X-Plex-Token": config.PLEX_TOKEN}
     query = album
 
     try:
         async with aiohttp.ClientSession() as session:
-            search_url = f"{PLEX_URL}/library/search?query={query}"
+            search_url = f"{config.PLEX_URL}/library/search?query={query}"
             async with session.get(search_url, headers=headers) as response:
                 if response.status != 200:
                     return None
@@ -363,8 +430,8 @@ async def get_plex_album_guid(artist: str, album: str) -> str | None:
                     best_guid = match.group(1)
 
         if best_score >= 85 and best_guid:
-            if PLEX_MACHINE_ID:
-                return f"https://listen.plex.tv/album/{best_guid}?source={PLEX_MACHINE_ID}"
+            if config.PLEX_MACHINE_ID:
+                return f"https://listen.plex.tv/album/{best_guid}?source={config.PLEX_MACHINE_ID}"
             else:
                 return f"https://app.plexamp.com/album/{best_guid}"
         return None
@@ -395,12 +462,14 @@ async def build_album_embed(url: str, plex_url: str = None):
     embed_color = discord.Color.purple()
     try:
         if cover:
-            response = requests.get(cover)
-            if response.ok:
-                dominant = ColorThief(BytesIO(response.content)).get_color(quality=1)
-                embed_color = discord.Color.from_rgb(*dominant)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(cover, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status == 200:
+                        content = await response.read()
+                        dominant = ColorThief(BytesIO(content)).get_color(quality=1)
+                        embed_color = discord.Color.from_rgb(*dominant)
     except Exception as e:
-        print("[WARN] Could not extract color:", e)
+        logger.warning(f"Could not extract color from cover {cover}: {e}")
 
     description = f"{artist}\n\n**Source:** [{source_name}]({source_url})"
     view = discord.ui.View()
@@ -727,27 +796,26 @@ async def on_raw_reaction_add(payload):
 @bot.event
 async def on_ready():
     try:
-        bot.tree.clear_commands(guild=DEV_GUILD)
+        bot.tree.clear_commands(guild=config.DEV_GUILD)
         print("[INFO] Cleared existing guild commands")
-        bot.tree.copy_global_to(guild=DEV_GUILD)
-        await bot.tree.sync(guild=DEV_GUILD)
-        print(f"[INFO] Synced commands to dev guild {DEV_GUILD_ID}")
+        bot.tree.copy_global_to(guild=config.DEV_GUILD)
+        await bot.tree.sync(guild=config.DEV_GUILD)
+        print(f"[INFO] Synced commands to dev guild {config.DEV_GUILD_ID}")
     except Exception as e:
         print(f"[WARN] Failed to sync commands: {e}")
     print(f"[INFO] Logged in as {bot.user}")
-    print(f"[INFO] Using music folder: {MUSIC_FOLDER}")
+    print(f"[INFO] Using music folder: {config.MUSIC_FOLDER}")
 
-    global PLEX_MACHINE_ID
-    if PLEX_TOKEN and PLEX_URL:
+    if config.PLEX_TOKEN and config.PLEX_URL:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{PLEX_URL}/?X-Plex-Token={PLEX_TOKEN}") as resp:
+                async with session.get(f"{config.PLEX_URL}/?X-Plex-Token={config.PLEX_TOKEN}") as resp:
                     if resp.status == 200:
                         xml = await resp.text()
                         match = re.search(r'machineIdentifier="([^"]+)"', xml)
                         if match:
-                            PLEX_MACHINE_ID = match.group(1)
-                            print(f"[INFO] Found Plex machine ID: {PLEX_MACHINE_ID}")
+                            config.PLEX_MACHINE_ID = match.group(1)
+                            print(f"[INFO] Found Plex machine ID: {config.PLEX_MACHINE_ID}")
         except Exception as e:
             print(f"[WARN] Could not fetch Plex machine ID: {e}")
 
@@ -757,6 +825,10 @@ async def on_ready():
 @bot.tree.command(name="testembed", description="Preview album embed from a source URL")
 @app_commands.describe(url="Link to Bandcamp, AOTY, Pitchfork, etc.")
 async def testembed(interaction: discord.Interaction, url: str):
+    if not validate_url(url):
+        await interaction.response.send_message("❌ Invalid URL provided.", ephemeral=True)
+        return
+        
     await interaction.response.defer(thinking=True, ephemeral=True)
     embed, view, _, _, _ = await build_album_embed(url)
     await interaction.followup.send(embed=embed, view=view)
@@ -765,6 +837,10 @@ async def testembed(interaction: discord.Interaction, url: str):
 @bot.tree.command(name="rip", description="Download album from any music source")
 @app_commands.describe(url="Music URL (Apple Music, Spotify, TIDAL, Bandcamp, blog reviews, etc.)")
 async def rip(interaction: discord.Interaction, url: str):
+    if not validate_url(url):
+        await interaction.response.send_message("❌ Invalid URL provided.", ephemeral=True)
+        return
+        
     await interaction.response.defer(thinking=True)
     await handle_rip_logic(interaction, url)
 
@@ -772,6 +848,10 @@ async def rip(interaction: discord.Interaction, url: str):
 @bot.tree.command(name="save", description="Save an album for later listening")
 @app_commands.describe(url="A link to Bandcamp, Pitchfork, AOTY, etc.")
 async def save(interaction: discord.Interaction, url: str):
+    if not validate_url(url):
+        await interaction.response.send_message("❌ Invalid URL provided.", ephemeral=True)
+        return
+        
     is_fake = isinstance(interaction, FakeInteraction)
 
     if not is_fake:
@@ -806,12 +886,13 @@ async def save(interaction: discord.Interaction, url: str):
 async def library(interaction: discord.Interaction, query: str):
     await interaction.response.defer(thinking=True)
 
-    if not PLEX_TOKEN or not PLEX_URL:
+    if not config.PLEX_TOKEN or not config.PLEX_URL:
         await interaction.followup.send("❌ Plex integration is not configured.")
         return
 
-    headers = {"X-Plex-Token": PLEX_TOKEN}
-    search_url = f"{PLEX_URL}/library/search?query={query}"
+    headers = {"X-Plex-Token": config.PLEX_TOKEN}
+    sanitized_query = sanitize_query(query)
+    search_url = f"{config.PLEX_URL}/library/search?query={sanitized_query}"
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -839,7 +920,7 @@ async def library(interaction: discord.Interaction, query: str):
             match = re.search(r"plex://album/([^?]+)", guid_raw)
             if match:
                 guid = match.group(1)
-                plexamp_url = f"https://listen.plex.tv/album/{guid}?source={PLEX_MACHINE_ID}"
+                plexamp_url = f"https://listen.plex.tv/album/{guid}?source={config.PLEX_MACHINE_ID}"
                 results.append({
                     "title": title,
                     "artist": artist,
@@ -862,7 +943,7 @@ async def library(interaction: discord.Interaction, query: str):
                 color=discord.Color.blue()
             )
             if r["thumb"]:
-                embed.set_thumbnail(url=f"{PLEX_URL}{r['thumb']}?X-Plex-Token={PLEX_TOKEN}")
+                embed.set_thumbnail(url=f"{config.PLEX_URL}{r['thumb']}?X-Plex-Token={config.PLEX_TOKEN}")
 
             view = discord.ui.View()
             view.add_item(discord.ui.Button(label="Plexamp", url=r["url"]))
@@ -1135,15 +1216,18 @@ async def handle_save_logic(interaction, url: str, mirror_only=False):
         user = interaction.user
         guild = interaction.guild
         
-        metadata = await extract_metadata(url)
-        if not metadata or not metadata.get("artist") or not metadata.get("album"):
-            print("[WARN] Metadata extraction failed or incomplete")
-            return
-
         # Fetch metadata early so we get artist/album
         metadata = await extract_metadata(url)
-        artist = metadata["artist"]
-        album = metadata["album"]
+        if not metadata:
+            logger.warning("Metadata extraction failed for URL: %s", url)
+            return
+            
+        artist = metadata.get("artist", "Unknown Artist")
+        album = metadata.get("album", "Unknown Album")
+        
+        if not artist or artist == "Unknown Artist" or not album or album == "Unknown Album":
+            logger.warning("Incomplete metadata for URL %s: artist=%s, album=%s", url, artist, album)
+            return
 
         plex_url = await get_plex_album_guid(artist, album)
         download_available = not plex_url
@@ -1281,12 +1365,53 @@ async def hotupdates(interaction: discord.Interaction):
         await interaction.followup.send("❌ Failed to fetch trending albums.", ephemeral=True)
 
 
+@bot.tree.command(name="import", description="Manually import files from downloads folder")
+@app_commands.describe(
+    autotag="Enable auto-tagging to fix metadata (default: False)",
+    path="Custom path to import from (default: /downloads)"
+)
+async def manual_import(interaction: discord.Interaction, autotag: bool = False, path: str = None):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    import_path = path or config.DOWNLOADS_FOLDER
+    
+    # Check if path exists and has files
+    if not os.path.exists(import_path):
+        await interaction.followup.send(f"❌ Path `{import_path}` does not exist.")
+        return
+        
+    # Count files to import
+    file_count = 0
+    for root, dirs, files in os.walk(import_path):
+        file_count += len([f for f in files if f.lower().endswith(('.mp3', '.flac', '.m4a', '.ogg', '.wma'))])
+    
+    if file_count == 0:
+        await interaction.followup.send(f"❌ No music files found in `{import_path}`.")
+        return
+    
+    # Start import
+    mode_text = "with auto-tagging enabled" if autotag else "without auto-tagging (-A flag)"
+    await interaction.followup.send(f"📀 Importing {file_count} music files from `{import_path}` {mode_text}...")
+    
+    success = await run_beet_import(use_autotag=autotag, path=import_path)
+    
+    if success:
+        result_text = "✅ Import completed successfully!"
+        if autotag:
+            result_text += "\n🏷️ Files were processed with auto-tagging to improve metadata."
+        else:
+            result_text += "\n📁 Files were moved as-is without metadata changes."
+        await interaction.followup.send(result_text)
+    else:
+        await interaction.followup.send("❌ Import failed. Check the logs for details.")
+
+
 @bot.tree.command(name="sync", description="Sync slash commands to this server")
 @commands.is_owner()
 async def sync_commands(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True, ephemeral=True)
-    bot.tree.copy_global_to(guild=DEV_GUILD)
-    await bot.tree.sync(guild=DEV_GUILD)
+    bot.tree.copy_global_to(guild=config.DEV_GUILD)
+    await bot.tree.sync(guild=config.DEV_GUILD)
     await interaction.followup.send("✅ Commands synced.", ephemeral=True)
 
 
@@ -1294,7 +1419,7 @@ async def sync_commands(interaction: discord.Interaction):
 async def scheduled_hotupdates():
     now = datetime.datetime.now()
     if now.weekday() in (2, 4):  # Wednesday and Friday
-        guild = bot.get_guild(DEV_GUILD_ID)
+        guild = bot.get_guild(config.DEV_GUILD_ID)
         if guild:
             channel = discord.utils.get(guild.text_channels, name="hot-updates")
             if channel:
@@ -1348,4 +1473,4 @@ async def recommend_album(interaction, message):
 
 
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    bot.run(config.TOKEN)

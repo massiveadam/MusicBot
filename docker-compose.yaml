@@ -11,6 +11,13 @@ services:
       - PLEX_TOKEN=${PLEX_TOKEN}
       - PLEX_URL=${PLEX_URL}
       - BEETS_WEB_ENABLED=true  # Optional: enable beets web interface
+      - MUSIC_FOLDER=${MUSIC_FOLDER:-/music}
+      - DOWNLOADS_FOLDER=${DOWNLOADS_FOLDER:-/downloads}
+      - DEV_GUILD_ID=${DEV_GUILD_ID}
+      - GAMDL_CODEC=${GAMDL_CODEC:-aac-legacy}
+      - COOKIES_PATH=${COOKIES_PATH:-/app/cookies.txt}
+      - DOWNLOAD_TIMEOUT=${DOWNLOAD_TIMEOUT:-300}
+      - RETRY_ATTEMPTS=${RETRY_ATTEMPTS:-3}
     volumes:
       - /mnt/user/data/media/music:/music
       - /mnt/user/data/media/music/downloads:/downloads
