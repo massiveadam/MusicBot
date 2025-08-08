@@ -21,13 +21,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Install MP4Box from static binary (more reliable than package manager)
-RUN curl -L https://github.com/gpac/gpac/releases/download/v2.4.0/gpac-2.4.0-rev0-gc5b5ef2c7-master-linux64-static.tar.gz -o gpac.tar.gz \
+# Install MP4Box using multiple fallback methods for reliability
+RUN (curl -L https://github.com/gpac/gpac/releases/download/v2.4.0/gpac-2.4.0-rev0-gc5b5ef2c7-master-linux64-static.tar.gz -o gpac.tar.gz \
     && tar -xzf gpac.tar.gz \
-    && install -m 0755 gpac-2.4.0-rev0-gc5b5ef2c7-master-linux64-static/MP4Box /usr/local/bin/MP4Box \
-    && install -m 0755 gpac-2.4.0-rev0-gc5b5ef2c7-master-linux64-static/mp4box /usr/local/bin/mp4box \
-    && rm -rf gpac.tar.gz gpac-2.4.0-rev0-gc5b5ef2c7-master-linux64-static \
-    && echo "MP4Box installed successfully"
+    && find . -name "MP4Box" -type f -executable -exec install -m 0755 {} /usr/local/bin/MP4Box \; \
+    && find . -name "mp4box" -type f -executable -exec install -m 0755 {} /usr/local/bin/mp4box \; \
+    && rm -rf gpac.tar.gz gpac-* \
+    && echo "MP4Box installed from static binary") \
+    || \
+    (echo "Static binary failed, trying package manager..." \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gpac \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "MP4Box installed from package manager") \
+    || \
+    (echo "Package manager failed, building from source..." \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends cmake make gcc g++ zlib1g-dev \
+    && git clone --depth 1 https://github.com/gpac/gpac.git /tmp/gpac \
+    && cd /tmp/gpac \
+    && ./configure --enable-static-bin \
+    && make -j$(nproc) \
+    && make install \
+    && cd / \
+    && rm -rf /tmp/gpac \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "MP4Box built from source")
 
 # Install mp4decrypt (Bento4)
 RUN curl -L https://www.bok.net/Bento4/binaries/Bento4-SDK-1-6-0-639.x86_64-unknown-linux.zip -o bento4.zip \
