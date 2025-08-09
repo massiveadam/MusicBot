@@ -3267,6 +3267,12 @@ class ScrobbleAuthView(discord.ui.View):
         await interaction.followup.send(embed=embed)
 
 
+@bot.tree.command(name="test_new_command", description="Test if new commands are working")
+async def test_new_command(interaction: discord.Interaction):
+    """Test command to verify new commands are being registered."""
+    await interaction.response.send_message("✅ New commands are working! Scrobbling commands should be available too.", ephemeral=True)
+
+
 @bot.tree.command(name="scrobble_add_user", description="[Admin] Manually add a user's Last.fm session key")
 @app_commands.describe(
     user="Discord user to add scrobbling for",
