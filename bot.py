@@ -141,8 +141,8 @@ class AudioSource:
                     part = best_media.find(".//Part")
                     if part is not None:
                         file_key = part.attrib.get("key", "")
-                        # Request highest quality with quality parameters
-                        file_path = f"{config.PLEX_URL}{file_key}?X-Plex-Token={config.PLEX_TOKEN}&format=flac"
+                        # Request audio without forcing format - let Plex serve the original format
+                        file_path = f"{config.PLEX_URL}{file_key}?X-Plex-Token={config.PLEX_TOKEN}"
                         
                         logger.info(f"Selected media with bitrate {best_bitrate}kbps for {title}")
                         tracks.append(AudioTrack(title, artist, file_path, duration))
@@ -337,31 +337,45 @@ class ListeningRoom:
                 self.voice_client.stop()
                 await asyncio.sleep(0.5)  # Give it a moment to stop
             
-            # Create FFmpeg audio source with highest quality options
+            # Create FFmpeg audio source with maximum quality Opus encoding
             ffmpeg_options = {
                 'before_options': (
                     '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 '
-                    '-probesize 50M -analyzeduration 50M '  # Better format detection
-                    '-fflags +discardcorrupt'  # Handle corrupt packets gracefully
+                    '-probesize 10M -analyzeduration 10M '  # Reduced for faster startup
+                    '-fflags +discardcorrupt+genpts '  # Handle corrupt packets and generate timestamps
+                    '-avoid_negative_ts make_zero '  # Handle timestamp issues
                 ),
                 'options': (
                     '-vn '  # No video
                     '-acodec libopus '  # Use Opus codec (matches Discord's format)
                     '-ar 48000 '  # 48kHz sample rate (Discord's native rate)
                     '-ac 2 '  # Stereo
-                    '-b:a 96k '  # Match Discord's actual bitrate limit
-                    '-application audio '  # Optimize for audio (not voip)
+                    '-b:a 96k '  # Discord's bitrate limit (maximum allowed)
+                    '-application audio '  # Optimize for music (not voip)
                     '-frame_duration 20 '  # 20ms frame duration for low latency
-                    '-compression_level 10 '  # Highest Opus compression quality
+                    '-compression_level 10 '  # Maximum Opus compression quality
                     '-vbr on '  # Variable bitrate for better quality
-                    '-filter:a "volume=0.95,loudnorm=I=-16:TP=-1.5:LRA=11"'  # Professional loudness normalization
+                    '-vbr_constraint on '  # Constrained VBR for consistent quality
+                    '-packet_loss 0 '  # Optimize for lossless transmission
+                    '-filter:a "volume=0.9,highpass=f=10,lowpass=f=20000" '  # Volume + frequency optimization
                 )
             }
             
             if track.file_path.startswith("http"):
                 # Streaming URL (Plex)
                 logger.info(f"Playing streaming URL: {track.file_path[:50]}...")
-                source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
+                try:
+                    source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
+                    logger.info(f"Successfully created FFmpeg source for streaming URL")
+                except Exception as e:
+                    logger.error(f"Failed to create FFmpeg source for streaming URL: {e}")
+                    # Try with simpler options as fallback
+                    fallback_options = {
+                        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                        'options': '-vn -acodec libopus -ar 48000 -ac 2 -b:a 96k'
+                    }
+                    source = discord.FFmpegPCMAudio(track.file_path, **fallback_options)
+                    logger.info(f"Using fallback FFmpeg options for streaming")
             else:
                 # Local file
                 logger.info(f"Playing local file: {track.file_path}")
@@ -3073,6 +3087,121 @@ async def reconnect_voice(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ Error during reconnect: {e}")
 
 
+@bot.tree.command(name="test_plex", description="[Debug] Test Plex streaming URL")
+@app_commands.describe(album_name="Album name to test streaming for")
+async def test_plex_streaming(interaction: discord.Interaction, album_name: str):
+    """Test Plex streaming URL generation and format detection."""
+    if not config.PLEX_TOKEN or not config.PLEX_URL:
+        await interaction.response.send_message("❌ Plex integration is not configured.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    try:
+        # Search for the album
+        headers = {"X-Plex-Token": config.PLEX_TOKEN}
+        search_url = f"{config.PLEX_URL}/library/search?query={sanitize_query(album_name)}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(search_url, headers=headers) as response:
+                if response.status != 200:
+                    await interaction.followup.send("❌ Failed to search Plex library.", ephemeral=True)
+                    return
+                xml = await response.text()
+        
+        root = ET.fromstring(xml)
+        albums = []
+        
+        for elem in root.findall(".//Directory") + root.findall(".//Video"):
+            if elem.attrib.get("type") != "album":
+                continue
+            
+            title = elem.attrib.get("title", "")
+            artist = elem.attrib.get("parentTitle", "")
+            combined = f"{artist} - {title}"
+            score = fuzz.token_sort_ratio(album_name.lower(), combined.lower())
+            
+            if score > 50:  # Only show relevant matches
+                albums.append({
+                    "title": title,
+                    "artist": artist,
+                    "score": score,
+                    "key": elem.attrib.get("key", ""),
+                    "combined": combined
+                })
+        
+        if not albums:
+            await interaction.followup.send(f"❌ No albums found for '{album_name}'.", ephemeral=True)
+            return
+        
+        # Sort by relevance and test the best match
+        albums.sort(key=lambda x: x["score"], reverse=True)
+        best_match = albums[0]
+        
+        # Test the streaming URL generation
+        album_url = f"{config.PLEX_URL}{best_match['key']}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(album_url, headers=headers) as response:
+                if response.status != 200:
+                    await interaction.followup.send("❌ Failed to fetch album details.", ephemeral=True)
+                    return
+                album_xml = await response.text()
+        
+        album_root = ET.fromstring(album_xml)
+        tracks_info = []
+        
+        for track in album_root.findall(".//Track")[:3]:  # Test first 3 tracks
+            title = track.attrib.get("title", "Unknown")
+            duration = int(track.attrib.get("duration", "0")) // 1000
+            
+            media_elements = track.findall(".//Media")
+            if media_elements:
+                best_media = media_elements[0]
+                bitrate = int(best_media.attrib.get("bitrate", "0"))
+                container = best_media.attrib.get("container", "unknown")
+                codec = best_media.attrib.get("codec", "unknown")
+                
+                part = best_media.find(".//Part")
+                if part is not None:
+                    file_key = part.attrib.get("key", "")
+                    streaming_url = f"{config.PLEX_URL}{file_key}?X-Plex-Token={config.PLEX_TOKEN}"
+                    
+                    tracks_info.append({
+                        "title": title,
+                        "duration": duration,
+                        "bitrate": bitrate,
+                        "container": container,
+                        "codec": codec,
+                        "url": streaming_url[:80] + "..." if len(streaming_url) > 80 else streaming_url
+                    })
+        
+        # Build response
+        embed = discord.Embed(
+            title="🔍 Plex Streaming Test",
+            description=f"**Best Match:** {best_match['combined']} (Score: {best_match['score']}%)",
+            color=discord.Color.blue()
+        )
+        
+        if tracks_info:
+            track_details = ""
+            for i, track in enumerate(tracks_info, 1):
+                track_details += f"**{i}. {track['title']}**\n"
+                track_details += f"   Duration: {track['duration']}s | Bitrate: {track['bitrate']}kbps\n"
+                track_details += f"   Format: {track['container']}/{track['codec']}\n"
+                track_details += f"   URL: `{track['url']}`\n\n"
+            
+            embed.add_field(name="Track Details", value=track_details, inline=False)
+        else:
+            embed.add_field(name="Tracks", value="❌ No tracks found", inline=False)
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        logger.error(f"Plex test error: {e}")
+        await interaction.followup.send(f"❌ Test failed: {e}", ephemeral=True)
+
+
 @bot.tree.command(name="quality", description="Show current audio quality settings")
 async def show_quality(interaction: discord.Interaction):
     """Show current audio quality configuration."""
@@ -3092,13 +3221,25 @@ async def show_quality(interaction: discord.Interaction):
         quality_info.append("• **Plex:** Native format → Opus")
     quality_info.append("")
     quality_info.append("**Discord Processing:**")
-    quality_info.append("• Opus 96kbps @ 48kHz stereo")
-    quality_info.append("• Professional loudness normalization")
-    quality_info.append("• Variable bitrate optimization")
-    quality_info.append("• Maximum Opus compression quality")
+    quality_info.append("• Opus 96kbps @ 48kHz stereo (Discord's maximum)")
+    quality_info.append("• Maximum compression quality (level 10)")
+    quality_info.append("• Constrained VBR for consistent quality")
+    quality_info.append("• Frequency optimization (10Hz-20kHz)")
+    quality_info.append("• Optimized for music (not voice)")
     
-    quality_info.append("\n⚠️ **Note:** Discord compresses ALL audio to ~96kbps Opus")
-    quality_info.append("High source quality still matters for the encoding process!")
+    quality_info.append("\n**Quality Comparison:**")
+    quality_info.append("• 96kbps Opus ≈ 128-160kbps MP3 quality")
+    quality_info.append("• Opus is more efficient than MP3")
+    quality_info.append("• Optimized for real-time music streaming")
+    
+    quality_info.append("\n**Plex Streaming Improvements:**")
+    quality_info.append("• ✅ No forced format transcoding")
+    quality_info.append("• ✅ Optimized reconnect settings")
+    quality_info.append("• ✅ Timestamp handling enabled")
+    quality_info.append("• ✅ Fallback audio options")
+    
+    quality_info.append("\n⚠️ **Note:** Discord has a hard 96kbps limit")
+    quality_info.append("We've optimized for the best possible quality within this limit!")
     quality_info.append("\n💡 **Current Mode:** Downloads Apple Music for best source quality")
     
     await interaction.followup.send("\n".join(quality_info))
