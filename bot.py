@@ -8,6 +8,8 @@ from pathlib import Path
 import uuid
 from typing import Dict, List, Optional
 import time
+import tempfile
+import shutil
 
 import subprocess
 import requests
@@ -63,6 +65,107 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# Audio Source Classes
+class AudioTrack:
+    """Represents a single audio track."""
+    
+    def __init__(self, title: str, artist: str, file_path: str, duration: int = 0):
+        self.title = title
+        self.artist = artist
+        self.file_path = file_path  # Local file path or temp file for downloaded tracks
+        self.duration = duration  # Duration in seconds
+        
+    def __str__(self):
+        return f"{self.artist} - {self.title}"
+
+
+class AudioSource:
+    """Handles audio source preparation for different input types."""
+    
+    @staticmethod
+    async def prepare_local_album(plex_key: str) -> List[AudioTrack]:
+        """Prepare tracks from local Plex library."""
+        if not config.PLEX_TOKEN or not config.PLEX_URL:
+            return []
+            
+        headers = {"X-Plex-Token": config.PLEX_TOKEN}
+        album_url = f"{config.PLEX_URL}{plex_key}"
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(album_url, headers=headers) as response:
+                    if response.status != 200:
+                        return []
+                    xml = await response.text()
+            
+            root = ET.fromstring(xml)
+            tracks = []
+            
+            for track in root.findall(".//Track"):
+                title = track.attrib.get("title", "Unknown")
+                artist = track.attrib.get("grandparentTitle", "Unknown Artist")
+                duration = int(track.attrib.get("duration", "0")) // 1000  # Convert to seconds
+                
+                # Get the media file path
+                media = track.find(".//Media")
+                part = media.find(".//Part") if media is not None else None
+                if part is not None:
+                    file_key = part.attrib.get("key", "")
+                    file_path = f"{config.PLEX_URL}{file_key}?X-Plex-Token={config.PLEX_TOKEN}"
+                    tracks.append(AudioTrack(title, artist, file_path, duration))
+                    
+            return sorted(tracks, key=lambda t: t.title)  # Sort by track title
+            
+        except Exception as e:
+            logger.error(f"Failed to prepare local album: {e}")
+            return []
+    
+    @staticmethod
+    async def prepare_apple_music_album(apple_url: str) -> List[AudioTrack]:
+        """Download and prepare tracks from Apple Music."""
+        temp_dir = tempfile.mkdtemp(prefix="listening_room_")
+        
+        try:
+            # Download the album using gamdl
+            returncode, output = await run_gamdl(apple_url, output_path=temp_dir)
+            if returncode != 0:
+                logger.error(f"Failed to download Apple Music album: {output}")
+                return []
+            
+            # Find audio files in the temp directory
+            tracks = []
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    if file.lower().endswith(('.mp3', '.m4a', '.flac')):
+                        file_path = os.path.join(root, file)
+                        
+                        # Extract metadata from the file
+                        try:
+                            metadata = MutagenFile(file_path, easy=True)
+                            if metadata:
+                                title = metadata.get('title', [file])[0] if isinstance(metadata.get('title'), list) else metadata.get('title', file)
+                                artist = metadata.get('artist', ['Unknown'])[0] if isinstance(metadata.get('artist'), list) else metadata.get('artist', 'Unknown')
+                                duration = int(getattr(metadata, 'length', 0))
+                                tracks.append(AudioTrack(title, artist, file_path, duration))
+                            else:
+                                # Fallback to filename
+                                tracks.append(AudioTrack(file, "Unknown Artist", file_path, 0))
+                        except Exception as e:
+                            logger.warning(f"Failed to read metadata from {file}: {e}")
+                            tracks.append(AudioTrack(file, "Unknown Artist", file_path, 0))
+            
+            return sorted(tracks, key=lambda t: t.title)
+            
+        except Exception as e:
+            logger.error(f"Failed to prepare Apple Music album: {e}")
+            # Clean up temp directory on error
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                pass
+            return []
+
+
 # Listening Room Classes
 class ListeningRoom:
     """Represents an active listening room session."""
@@ -87,10 +190,12 @@ class ListeningRoom:
         
         # Playback state
         self.current_track = 0
-        self.tracks: List[Dict] = []  # List of track info dicts
+        self.tracks: List[AudioTrack] = []  # List of AudioTrack objects
         self.is_playing = False
+        self.is_paused = False
         self.start_time = None
         self.pause_time = None
+        self.temp_dir = None  # For Apple Music downloads
         
         # Created timestamp
         self.created_at = time.time()
@@ -100,7 +205,7 @@ class ListeningRoom:
         return len(self.participants) >= self.max_participants
         
     @property
-    def current_track_info(self) -> Optional[Dict]:
+    def current_track_info(self) -> Optional[AudioTrack]:
         if 0 <= self.current_track < len(self.tracks):
             return self.tracks[self.current_track]
         return None
@@ -120,6 +225,137 @@ class ListeningRoom:
             self.participants.remove(member)
             return True
         return False
+        
+    async def load_tracks(self) -> bool:
+        """Load tracks based on source type."""
+        try:
+            if self.source_type == "local":
+                self.tracks = await AudioSource.prepare_local_album(self.source_data)
+            elif self.source_type == "apple_music":
+                self.tracks = await AudioSource.prepare_apple_music_album(self.source_data)
+                # Store temp directory for cleanup
+                if self.tracks and self.tracks[0].file_path:
+                    self.temp_dir = os.path.dirname(self.tracks[0].file_path)
+            
+            return len(self.tracks) > 0
+        except Exception as e:
+            logger.error(f"Failed to load tracks for room {self.room_id}: {e}")
+            return False
+    
+    async def connect_voice(self) -> bool:
+        """Connect to the voice channel."""
+        if not self.voice_channel:
+            return False
+            
+        try:
+            self.voice_client = await self.voice_channel.connect()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to connect to voice channel: {e}")
+            return False
+    
+    async def disconnect_voice(self):
+        """Disconnect from voice channel."""
+        if self.voice_client:
+            await self.voice_client.disconnect()
+            self.voice_client = None
+    
+    async def play_current_track(self) -> bool:
+        """Start playing the current track."""
+        if not self.voice_client or not self.current_track_info:
+            return False
+            
+        try:
+            track = self.current_track_info
+            
+            # Create FFmpeg audio source
+            if track.file_path.startswith("http"):
+                # Streaming URL (Plex)
+                source = discord.FFmpegPCMAudio(
+                    track.file_path,
+                    options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+                )
+            else:
+                # Local file
+                source = discord.FFmpegPCMAudio(track.file_path)
+            
+            # Play the audio
+            self.voice_client.play(source, after=lambda e: asyncio.create_task(self._track_finished(e)) if e else None)
+            self.is_playing = True
+            self.is_paused = False
+            self.start_time = time.time()
+            
+            logger.info(f"Started playing {track} in room {self.room_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to play track: {e}")
+            return False
+    
+    async def pause(self):
+        """Pause playback."""
+        if self.voice_client and self.voice_client.is_playing():
+            self.voice_client.pause()
+            self.is_paused = True
+            self.pause_time = time.time()
+    
+    async def resume(self):
+        """Resume playback."""
+        if self.voice_client and self.voice_client.is_paused():
+            self.voice_client.resume()
+            self.is_paused = False
+            # Adjust start time for pause duration
+            if self.pause_time and self.start_time:
+                pause_duration = time.time() - self.pause_time
+                self.start_time += pause_duration
+            self.pause_time = None
+    
+    async def stop(self):
+        """Stop playback."""
+        if self.voice_client:
+            self.voice_client.stop()
+            self.is_playing = False
+            self.is_paused = False
+    
+    async def skip_to_next(self) -> bool:
+        """Skip to the next track."""
+        if self.current_track < len(self.tracks) - 1:
+            await self.stop()
+            self.current_track += 1
+            return await self.play_current_track()
+        return False
+    
+    async def skip_to_previous(self) -> bool:
+        """Skip to the previous track."""
+        if self.current_track > 0:
+            await self.stop()
+            self.current_track -= 1
+            return await self.play_current_track()
+        return False
+    
+    async def _track_finished(self, error):
+        """Called when a track finishes playing."""
+        if error:
+            logger.error(f"Audio playback error: {error}")
+        
+        # Auto-advance to next track
+        if not await self.skip_to_next():
+            # End of album
+            self.is_playing = False
+            if self.text_channel:
+                await self.text_channel.send("🎵 **Album finished!** Thanks for listening together! 🎉")
+    
+    async def cleanup(self):
+        """Clean up room resources."""
+        await self.disconnect_voice()
+        
+        # Clean up temp directory for Apple Music downloads
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            try:
+                shutil.rmtree(self.temp_dir)
+                logger.info(f"Cleaned up temp directory: {self.temp_dir}")
+            except Exception as e:
+                logger.error(f"Failed to clean up temp directory: {e}")
 
 
 class ListeningRoomManager:
@@ -195,12 +431,11 @@ class ListeningRoomManager:
             for user_id in users_to_remove:
                 del self.user_rooms[user_id]
             
+            # Clean up room resources (audio, temp files, etc.)
+            await room.cleanup()
+            
             # Delete Discord channels
             try:
-                if room.voice_channel:
-                    await room.voice_channel.delete(reason="Listening room ended")
-                    logger.info(f"Deleted voice channel for room {room_id}")
-                    
                 if room.text_channel:
                     # Send farewell message before deleting
                     await room.text_channel.send("🎵 **Listening room ended.** Thanks for listening together! 👋")
@@ -208,9 +443,9 @@ class ListeningRoomManager:
                     await room.text_channel.delete(reason="Listening room ended")
                     logger.info(f"Deleted text channel for room {room_id}")
                     
-                # Disconnect voice client if connected
-                if room.voice_client:
-                    await room.voice_client.disconnect()
+                if room.voice_channel:
+                    await room.voice_channel.delete(reason="Listening room ended")
+                    logger.info(f"Deleted voice channel for room {room_id}")
                     
             except Exception as e:
                 logger.error(f"Error cleaning up channels for room {room_id}: {e}")
@@ -232,6 +467,191 @@ class ListeningRoomManager:
 
 # Global room manager
 room_manager = ListeningRoomManager()
+
+
+# Playback Control UI
+class PlaybackControlView(discord.ui.View):
+    """Interactive playback controls for listening rooms."""
+    
+    def __init__(self, room_id: str):
+        super().__init__(timeout=None)  # Persistent view
+        self.room_id = room_id
+        
+    async def update_buttons(self, room: ListeningRoom):
+        """Update button states based on room status."""
+        # Update play/pause button
+        play_pause_button = self.children[0]
+        if room.is_playing and not room.is_paused:
+            play_pause_button.label = "⏸️ Pause"
+            play_pause_button.style = discord.ButtonStyle.secondary
+        else:
+            play_pause_button.label = "▶️ Play"
+            play_pause_button.style = discord.ButtonStyle.green
+            
+        # Update skip buttons based on track position
+        prev_button = self.children[1]
+        next_button = self.children[2]
+        
+        prev_button.disabled = room.current_track <= 0
+        next_button.disabled = room.current_track >= len(room.tracks) - 1
+    
+    @discord.ui.button(label="▶️ Play", style=discord.ButtonStyle.green, custom_id="play_pause")
+    async def play_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
+        room = room_manager.get_room(self.room_id)
+        if not room:
+            await interaction.response.send_message("❌ Room not found.", ephemeral=True)
+            return
+            
+        if interaction.user not in room.participants:
+            await interaction.response.send_message("❌ You're not in this listening room.", ephemeral=True)
+            return
+        
+        try:
+            if room.is_playing and not room.is_paused:
+                # Pause
+                await room.pause()
+                action = "paused"
+                emoji = "⏸️"
+            else:
+                # Play or resume
+                if room.is_paused:
+                    await room.resume()
+                    action = "resumed"
+                else:
+                    await room.play_current_track()
+                    action = "started"
+                emoji = "▶️"
+            
+            await self.update_buttons(room)
+            await interaction.response.edit_message(view=self)
+            
+            # Announce the action
+            if room.text_channel:
+                await room.text_channel.send(f"{emoji} **{interaction.user.display_name}** {action} the music")
+                
+        except Exception as e:
+            logger.error(f"Play/pause error: {e}")
+            await interaction.response.send_message("❌ Failed to control playback.", ephemeral=True)
+    
+    @discord.ui.button(label="⏮️ Previous", style=discord.ButtonStyle.secondary, custom_id="previous")
+    async def previous_track(self, interaction: discord.Interaction, button: discord.ui.Button):
+        room = room_manager.get_room(self.room_id)
+        if not room:
+            await interaction.response.send_message("❌ Room not found.", ephemeral=True)
+            return
+            
+        if interaction.user not in room.participants:
+            await interaction.response.send_message("❌ You're not in this listening room.", ephemeral=True)
+            return
+        
+        if room.current_track <= 0:
+            await interaction.response.send_message("❌ Already at the first track.", ephemeral=True)
+            return
+        
+        try:
+            success = await room.skip_to_previous()
+            await self.update_buttons(room)
+            await interaction.response.edit_message(view=self)
+            
+            if success and room.text_channel:
+                track = room.current_track_info
+                await room.text_channel.send(f"⏮️ **{interaction.user.display_name}** skipped to previous track: **{track}**")
+            
+        except Exception as e:
+            logger.error(f"Previous track error: {e}")
+            await interaction.response.send_message("❌ Failed to skip to previous track.", ephemeral=True)
+    
+    @discord.ui.button(label="⏭️ Next", style=discord.ButtonStyle.secondary, custom_id="next")
+    async def next_track(self, interaction: discord.Interaction, button: discord.ui.Button):
+        room = room_manager.get_room(self.room_id)
+        if not room:
+            await interaction.response.send_message("❌ Room not found.", ephemeral=True)
+            return
+            
+        if interaction.user not in room.participants:
+            await interaction.response.send_message("❌ You're not in this listening room.", ephemeral=True)
+            return
+        
+        if room.current_track >= len(room.tracks) - 1:
+            await interaction.response.send_message("❌ Already at the last track.", ephemeral=True)
+            return
+        
+        try:
+            success = await room.skip_to_next()
+            await self.update_buttons(room)
+            await interaction.response.edit_message(view=self)
+            
+            if success and room.text_channel:
+                track = room.current_track_info
+                await room.text_channel.send(f"⏭️ **{interaction.user.display_name}** skipped to next track: **{track}**")
+            
+        except Exception as e:
+            logger.error(f"Next track error: {e}")
+            await interaction.response.send_message("❌ Failed to skip to next track.", ephemeral=True)
+    
+    @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id="stop")
+    async def stop_playback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        room = room_manager.get_room(self.room_id)
+        if not room:
+            await interaction.response.send_message("❌ Room not found.", ephemeral=True)
+            return
+            
+        if interaction.user not in room.participants:
+            await interaction.response.send_message("❌ You're not in this listening room.", ephemeral=True)
+            return
+        
+        try:
+            await room.stop()
+            await self.update_buttons(room)
+            await interaction.response.edit_message(view=self)
+            
+            if room.text_channel:
+                await room.text_channel.send(f"⏹️ **{interaction.user.display_name}** stopped the music")
+            
+        except Exception as e:
+            logger.error(f"Stop playback error: {e}")
+            await interaction.response.send_message("❌ Failed to stop playback.", ephemeral=True)
+
+async def create_now_playing_embed(room: ListeningRoom) -> discord.Embed:
+    """Create a 'Now Playing' embed for the room."""
+    track = room.current_track_info
+    if not track:
+        embed = discord.Embed(
+            title="🎵 Listening Room",
+            description=f"**{room.artist} - {room.album}**\n\nNo track currently playing.",
+            color=discord.Color.blue()
+        )
+    else:
+        # Track position
+        track_num = room.current_track + 1
+        total_tracks = len(room.tracks)
+        
+        # Status
+        if room.is_playing and not room.is_paused:
+            status = "🎵 Now Playing"
+            color = discord.Color.green()
+        elif room.is_paused:
+            status = "⏸️ Paused"
+            color = discord.Color.orange()
+        else:
+            status = "⏹️ Stopped"
+            color = discord.Color.red()
+        
+        embed = discord.Embed(
+            title=status,
+            description=f"**{track}**\n\nFrom: *{room.album}*",
+            color=color
+        )
+        embed.add_field(name="Track", value=f"{track_num}/{total_tracks}", inline=True)
+        embed.add_field(name="Participants", value=f"{len(room.participants)}/{room.max_participants}", inline=True)
+        embed.add_field(name="Room ID", value=f"`{room.room_id}`", inline=True)
+        
+        if track.duration > 0:
+            duration_str = f"{track.duration // 60}:{track.duration % 60:02d}"
+            embed.add_field(name="Duration", value=duration_str, inline=True)
+    
+    return embed
+
 
 intents = discord.Intents.default()
 intents.message_content = True  # Required for reading mentions in messages
@@ -1832,10 +2252,55 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         # Send initial message to the text channel
         welcome_msg = f"🎵 **Welcome to the listening room for {artist} - {album}!**\n\n"
         welcome_msg += f"• Join the voice channel: {room.voice_channel.mention}\n"
-        welcome_msg += f"• Anyone can control the music using reactions or commands\n"
+        welcome_msg += f"• Anyone can control the music using the buttons below\n"
         welcome_msg += f"• Room ID: `{room.room_id}`"
         
         await room.text_channel.send(welcome_msg)
+        
+        # Load tracks and start audio setup
+        loading_msg = await room.text_channel.send("📀 Loading tracks...")
+        
+        # Load album tracks
+        tracks_loaded = await room.load_tracks()
+        if not tracks_loaded:
+            await loading_msg.edit(content="❌ Failed to load tracks for this album.")
+            await room_manager.cleanup_room(room.room_id)
+            return
+        
+        # Connect to voice channel
+        voice_connected = await room.connect_voice()
+        if not voice_connected:
+            await loading_msg.edit(content="❌ Failed to connect to voice channel.")
+            await room_manager.cleanup_room(room.room_id)
+            return
+        
+        # Create now playing embed and controls
+        now_playing_embed = await create_now_playing_embed(room)
+        playback_controls = PlaybackControlView(room.room_id)
+        await playback_controls.update_buttons(room)
+        
+        # Send the now playing interface
+        await loading_msg.edit(
+            content=f"✅ Loaded {len(room.tracks)} tracks! Ready to play.",
+            embed=now_playing_embed,
+            view=playback_controls
+        )
+        
+        # Auto-start playback
+        await asyncio.sleep(1)  # Give a moment for everything to settle
+        success = await room.play_current_track()
+        if success:
+            # Update the embed to show now playing
+            updated_embed = await create_now_playing_embed(room)
+            await playback_controls.update_buttons(room)
+            await loading_msg.edit(
+                content=f"🎵 **Now playing {artist} - {album}**",
+                embed=updated_embed,
+                view=playback_controls
+            )
+            await room.text_channel.send(f"🎵 Auto-started playback! **{room.current_track_info}**")
+        else:
+            await room.text_channel.send("⚠️ Tracks loaded but failed to start playback. Use the ▶️ button to start.")
         
         logger.info(f"Successfully created listening room {room.room_id} for {artist} - {album}")
         
@@ -1976,6 +2441,112 @@ async def on_interaction(interaction: discord.Interaction):
         if room.text_channel:
             await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})")
 
+
+# ==================== PLAYBACK CONTROL COMMANDS ====================
+
+@bot.tree.command(name="play", description="Start or resume playback in your listening room")
+async def play_command(interaction: discord.Interaction):
+    """Start or resume playback."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    room = room_manager.get_user_room(interaction.user.id)
+    if not room:
+        await interaction.followup.send("❌ You're not in any listening room.")
+        return
+    
+    try:
+        if room.is_paused:
+            await room.resume()
+            await interaction.followup.send("▶️ Resumed playback.")
+        else:
+            success = await room.play_current_track()
+            if success:
+                track = room.current_track_info
+                await interaction.followup.send(f"▶️ Started playing: **{track}**")
+            else:
+                await interaction.followup.send("❌ Failed to start playback.")
+    except Exception as e:
+        logger.error(f"Play command error: {e}")
+        await interaction.followup.send("❌ Failed to control playback.")
+
+
+@bot.tree.command(name="pause", description="Pause playback in your listening room")
+async def pause_command(interaction: discord.Interaction):
+    """Pause playback."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    room = room_manager.get_user_room(interaction.user.id)
+    if not room:
+        await interaction.followup.send("❌ You're not in any listening room.")
+        return
+    
+    try:
+        await room.pause()
+        await interaction.followup.send("⏸️ Paused playback.")
+    except Exception as e:
+        logger.error(f"Pause command error: {e}")
+        await interaction.followup.send("❌ Failed to pause playback.")
+
+
+@bot.tree.command(name="skip", description="Skip to the next track")
+async def skip_command(interaction: discord.Interaction):
+    """Skip to next track."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    room = room_manager.get_user_room(interaction.user.id)
+    if not room:
+        await interaction.followup.send("❌ You're not in any listening room.")
+        return
+    
+    try:
+        success = await room.skip_to_next()
+        if success:
+            track = room.current_track_info
+            await interaction.followup.send(f"⏭️ Skipped to: **{track}**")
+        else:
+            await interaction.followup.send("❌ Cannot skip - already at last track.")
+    except Exception as e:
+        logger.error(f"Skip command error: {e}")
+        await interaction.followup.send("❌ Failed to skip track.")
+
+
+@bot.tree.command(name="back", description="Go back to the previous track")
+async def back_command(interaction: discord.Interaction):
+    """Go to previous track."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    room = room_manager.get_user_room(interaction.user.id)
+    if not room:
+        await interaction.followup.send("❌ You're not in any listening room.")
+        return
+    
+    try:
+        success = await room.skip_to_previous()
+        if success:
+            track = room.current_track_info
+            await interaction.followup.send(f"⏮️ Went back to: **{track}**")
+        else:
+            await interaction.followup.send("❌ Cannot go back - already at first track.")
+    except Exception as e:
+        logger.error(f"Back command error: {e}")
+        await interaction.followup.send("❌ Failed to go back to previous track.")
+
+
+@bot.tree.command(name="nowplaying", description="Show what's currently playing in your room")
+async def nowplaying_command(interaction: discord.Interaction):
+    """Show current track info."""
+    await interaction.response.defer(thinking=True)
+    
+    room = room_manager.get_user_room(interaction.user.id)
+    if not room:
+        await interaction.followup.send("❌ You're not in any listening room.")
+        return
+    
+    embed = await create_now_playing_embed(room)
+    await interaction.followup.send(embed=embed)
+
+
+# ==================== END PLAYBACK CONTROL COMMANDS ====================
 
 # ==================== END LISTENING ROOM COMMANDS ====================
 
