@@ -621,23 +621,38 @@ class ScrobbleManager:
             return None
         
         try:
-            # First, test if we can create a basic network connection
-            logger.info(f"Creating Last.fm network with API key: {config.LASTFM_API_KEY[:8]}...")
-            network = pylast.LastFMNetwork(
-                api_key=config.LASTFM_API_KEY,
-                api_secret=config.LASTFM_API_SECRET
-            )
+            # Use direct Last.fm API call instead of pylast methods
+            import hashlib
+            import aiohttp
             
-            # Get request token
-            logger.info("Requesting auth token from Last.fm...")
-            token = await asyncio.get_event_loop().run_in_executor(
-                None,
-                network.get_request_token
-            )
+            logger.info(f"Getting Last.fm auth token via API with key: {config.LASTFM_API_KEY[:8]}...")
             
-            logger.info(f"Got Last.fm token: {token[:8]}...")
-            # Return proper auth URL with token
-            return f"https://www.last.fm/api/auth/?api_key={config.LASTFM_API_KEY}&token={token}"
+            # Create API signature
+            api_sig_string = f"api_key{config.LASTFM_API_KEY}methodauth.getToken{config.LASTFM_API_SECRET}"
+            api_sig = hashlib.md5(api_sig_string.encode('utf-8')).hexdigest()
+            
+            # Make API request
+            async with aiohttp.ClientSession() as session:
+                params = {
+                    'method': 'auth.getToken',
+                    'api_key': config.LASTFM_API_KEY,
+                    'api_sig': api_sig,
+                    'format': 'json'
+                }
+                
+                async with session.get('https://ws.audioscrobbler.com/2.0/', params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if 'token' in data:
+                            token = data['token']
+                            logger.info(f"Got Last.fm token: {token[:8]}...")
+                            return f"https://www.last.fm/api/auth/?api_key={config.LASTFM_API_KEY}&token={token}"
+                        else:
+                            logger.error(f"No token in Last.fm response: {data}")
+                            return None
+                    else:
+                        logger.error(f"Last.fm API error: {response.status}")
+                        return None
             
         except Exception as e:
             logger.error(f"Failed to get Last.fm auth token: {type(e).__name__}: {e}")
@@ -651,22 +666,42 @@ class ScrobbleManager:
             return None
         
         try:
-            network = pylast.LastFMNetwork(
-                api_key=config.LASTFM_API_KEY,
-                api_secret=config.LASTFM_API_SECRET
-            )
+            # Use direct Last.fm API call for session key exchange
+            import hashlib
+            import aiohttp
             
-            # Exchange token for session key
-            session_key = await asyncio.get_event_loop().run_in_executor(
-                None,
-                network.get_web_auth_session_key,
-                token
-            )
+            logger.info(f"Exchanging token for session key: {token[:8]}...")
             
-            return session_key
+            # Create API signature for auth.getSession
+            api_sig_string = f"api_key{config.LASTFM_API_KEY}methodauth.getSessiontoken{token}{config.LASTFM_API_SECRET}"
+            api_sig = hashlib.md5(api_sig_string.encode('utf-8')).hexdigest()
+            
+            # Make API request
+            async with aiohttp.ClientSession() as session:
+                params = {
+                    'method': 'auth.getSession',
+                    'api_key': config.LASTFM_API_KEY,
+                    'token': token,
+                    'api_sig': api_sig,
+                    'format': 'json'
+                }
+                
+                async with session.get('https://ws.audioscrobbler.com/2.0/', params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if 'session' in data and 'key' in data['session']:
+                            session_key = data['session']['key']
+                            logger.info(f"Got Last.fm session key: {session_key[:8]}...")
+                            return session_key
+                        else:
+                            logger.error(f"No session key in Last.fm response: {data}")
+                            return None
+                    else:
+                        logger.error(f"Last.fm session API error: {response.status}")
+                        return None
             
         except Exception as e:
-            logger.error(f"Failed to get Last.fm session key: {e}")
+            logger.error(f"Failed to get Last.fm session key: {type(e).__name__}: {e}")
             return None
 
 
