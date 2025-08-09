@@ -23,9 +23,11 @@ from io import BytesIO
 try:
     import pylast
     PYLAST_AVAILABLE = True
-except ImportError:
+    print(f"[INFO] pylast library loaded successfully: {pylast.__version__}")
+except ImportError as e:
     PYLAST_AVAILABLE = False
     pylast = None
+    print(f"[WARNING] pylast library not available: {e}")
 from PIL import Image
 from urllib.parse import urlparse
 import re
@@ -619,24 +621,29 @@ class ScrobbleManager:
             return None
         
         try:
-            # First, get a request token from Last.fm
+            # First, test if we can create a basic network connection
+            logger.info(f"Creating Last.fm network with API key: {config.LASTFM_API_KEY[:8]}...")
             network = pylast.LastFMNetwork(
                 api_key=config.LASTFM_API_KEY,
                 api_secret=config.LASTFM_API_SECRET
             )
             
             # Get request token
+            logger.info("Requesting auth token from Last.fm...")
             token = await asyncio.get_event_loop().run_in_executor(
                 None,
                 network.get_request_token
             )
             
+            logger.info(f"Got Last.fm token: {token[:8]}...")
             # Return proper auth URL with token
             return f"https://www.last.fm/api/auth/?api_key={config.LASTFM_API_KEY}&token={token}"
             
         except Exception as e:
-            logger.error(f"Failed to get Last.fm auth token: {e}")
-            return None
+            logger.error(f"Failed to get Last.fm auth token: {type(e).__name__}: {e}")
+            # For debugging - let's also try a simpler approach
+            logger.info("Falling back to basic auth URL without token...")
+            return f"https://www.last.fm/api/auth/?api_key={config.LASTFM_API_KEY}"
     
     async def get_session_key(self, token: str) -> Optional[str]:
         """Exchange an authorized token for a session key."""
