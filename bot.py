@@ -1590,6 +1590,49 @@ async def sync_commands(interaction: discord.Interaction):
     await interaction.followup.send("✅ Commands synced.", ephemeral=True)
 
 
+@bot.tree.command(name="clear-commands", description="[Admin] Clear all slash commands from this server")
+@commands.is_owner()
+async def clear_commands(interaction: discord.Interaction):
+    """Clear all slash commands from the current guild."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    try:
+        # Clear all commands from the guild
+        bot.tree.clear_commands(guild=config.DEV_GUILD)
+        await bot.tree.sync(guild=config.DEV_GUILD)
+        
+        await interaction.followup.send("🧹 All slash commands cleared from this server.", ephemeral=True)
+        
+    except Exception as e:
+        logger.error(f"Failed to clear commands: {e}")
+        await interaction.followup.send(f"❌ Failed to clear commands: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="resync", description="[Admin] Clear and re-sync all commands")
+@commands.is_owner()
+async def resync_commands(interaction: discord.Interaction):
+    """Clear all commands and re-sync them."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    try:
+        # Clear all commands first
+        bot.tree.clear_commands(guild=config.DEV_GUILD)
+        await bot.tree.sync(guild=config.DEV_GUILD)
+        
+        # Wait a moment
+        await asyncio.sleep(1)
+        
+        # Re-sync all current commands
+        bot.tree.copy_global_to(guild=config.DEV_GUILD)
+        await bot.tree.sync(guild=config.DEV_GUILD)
+        
+        await interaction.followup.send("🔄 Commands cleared and re-synced successfully.", ephemeral=True)
+        
+    except Exception as e:
+        logger.error(f"Failed to resync commands: {e}")
+        await interaction.followup.send(f"❌ Failed to resync commands: {e}", ephemeral=True)
+
+
 @tasks.loop(time=datetime.time(hour=17, minute=30))
 async def scheduled_hotupdates():
     now = datetime.datetime.now()
