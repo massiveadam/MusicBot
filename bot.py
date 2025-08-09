@@ -167,7 +167,7 @@ class ListeningRoomManager:
             return True
         return False
         
-    def leave_room(self, member: discord.Member) -> Optional[str]:
+    async def leave_room(self, member: discord.Member) -> Optional[str]:
         """Remove a user from their current room. Returns room_id if they were in one."""
         current_room_id = self.user_rooms.get(member.id)
         if not current_room_id:
@@ -180,23 +180,50 @@ class ListeningRoomManager:
             
             # If room is empty, clean it up
             if len(room.participants) == 0:
-                self.cleanup_room(current_room_id)
+                await self.cleanup_room(current_room_id)
                 
             logger.info(f"User {member.name} left room {current_room_id}")
             return current_room_id
         return None
         
-    def cleanup_room(self, room_id: str):
-        """Clean up an empty room."""
+    async def cleanup_room(self, room_id: str):
+        """Clean up an empty room and delete Discord channels."""
         room = self.rooms.get(room_id)
         if room:
             # Clean up any remaining user mappings
             users_to_remove = [user_id for user_id, rid in self.user_rooms.items() if rid == room_id]
             for user_id in users_to_remove:
                 del self.user_rooms[user_id]
+            
+            # Delete Discord channels
+            try:
+                if room.voice_channel:
+                    await room.voice_channel.delete(reason="Listening room ended")
+                    logger.info(f"Deleted voice channel for room {room_id}")
+                    
+                if room.text_channel:
+                    # Send farewell message before deleting
+                    await room.text_channel.send("🎵 **Listening room ended.** Thanks for listening together! 👋")
+                    await asyncio.sleep(2)  # Give people time to see the message
+                    await room.text_channel.delete(reason="Listening room ended")
+                    logger.info(f"Deleted text channel for room {room_id}")
+                    
+                # Disconnect voice client if connected
+                if room.voice_client:
+                    await room.voice_client.disconnect()
+                    
+            except Exception as e:
+                logger.error(f"Error cleaning up channels for room {room_id}: {e}")
                 
             del self.rooms[room_id]
             logger.info(f"Cleaned up room {room_id}")
+            
+    async def cleanup_all_rooms(self):
+        """Clean up all active rooms (admin function)."""
+        room_ids = list(self.rooms.keys())
+        for room_id in room_ids:
+            await self.cleanup_room(room_id)
+        logger.info(f"Cleaned up {len(room_ids)} rooms")
             
     def get_all_rooms(self) -> List[ListeningRoom]:
         """Get all active rooms."""
@@ -1584,9 +1611,10 @@ async def before_scheduled_hotupdates():
 @bot.tree.command(name="golive", description="Start a listening room for an album")
 @app_commands.describe(
     source="Album name to search in your library OR Apple Music URL",
-    album_name="Specific album name if searching library"
+    album_name="Specific album name if searching library",
+silent="Create room silently without public announcement (default: False)"
 )
-async def golive(interaction: discord.Interaction, source: str, album_name: str = None):
+async def golive(interaction: discord.Interaction, source: str, album_name: str = None, silent: bool = False):
     """Start a listening room with an album."""
     await interaction.response.defer(thinking=True)
     
@@ -1742,7 +1770,21 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         )
         view.add_item(join_button)
         
-        await interaction.followup.send(embed=embed, view=view)
+        # Send response based on silent mode
+        if silent:
+            # Silent mode: only creator sees the response
+            await interaction.followup.send(
+                f"🔇 **Silent room created!**\n\n"
+                f"**{artist} - {album}**\n"
+                f"Room ID: `{room.room_id}`\n"
+                f"Voice: {room.voice_channel.mention}\n"
+                f"Chat: {room.text_channel.mention}\n\n"
+                f"Share the room ID or channels privately!",
+                ephemeral=True
+            )
+        else:
+            # Public mode: everyone can see, but no pings/notifications
+            await interaction.followup.send(embed=embed, view=view, suppress_embeds=False, silent=True)
         
         # Send initial message to the text channel
         welcome_msg = f"🎵 **Welcome to the listening room for {artist} - {album}!**\n\n"
@@ -1796,7 +1838,7 @@ async def leave_room_command(interaction: discord.Interaction):
     """Leave the current listening room."""
     await interaction.response.defer(thinking=True, ephemeral=True)
     
-    room_id = room_manager.leave_room(interaction.user)
+    room_id = await room_manager.leave_room(interaction.user)
     if not room_id:
         await interaction.followup.send("❌ You're not in any listening room.")
         return
@@ -1833,6 +1875,21 @@ async def list_rooms(interaction: discord.Interaction):
         )
     
     await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="cleanup", description="[Admin] Delete all listening rooms and channels")
+@commands.is_owner()
+async def cleanup_all_rooms_command(interaction: discord.Interaction):
+    """Admin command to clean up all listening rooms."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    rooms_count = len(room_manager.get_all_rooms())
+    if rooms_count == 0:
+        await interaction.followup.send("🔇 No active listening rooms to clean up.")
+        return
+    
+    await room_manager.cleanup_all_rooms()
+    await interaction.followup.send(f"🧹 Cleaned up {rooms_count} listening rooms and their channels.")
 
 
 # Handle button interactions for joining rooms
