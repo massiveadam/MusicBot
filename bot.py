@@ -20,7 +20,12 @@ from universal_scraper import extract_metadata  # async for /ripurl and /save
 from colorthief import ColorThief
 from bs4 import BeautifulSoup
 from io import BytesIO
-import pylast
+try:
+    import pylast
+    PYLAST_AVAILABLE = True
+except ImportError:
+    PYLAST_AVAILABLE = False
+    pylast = None
 from PIL import Image
 from urllib.parse import urlparse
 import re
@@ -474,7 +479,7 @@ class ScrobbleUser:
     
     def _setup_network(self):
         """Setup Last.fm network connection."""
-        if config.LASTFM_API_KEY and config.LASTFM_API_SECRET:
+        if PYLAST_AVAILABLE and config.LASTFM_API_KEY and config.LASTFM_API_SECRET:
             self.network = pylast.LastFMNetwork(
                 api_key=config.LASTFM_API_KEY,
                 api_secret=config.LASTFM_API_SECRET,
@@ -610,7 +615,7 @@ class ScrobbleManager:
     
     def get_auth_url(self) -> Optional[str]:
         """Get Last.fm authentication URL."""
-        if not config.LASTFM_API_KEY:
+        if not PYLAST_AVAILABLE or not config.LASTFM_API_KEY:
             return None
         
         return f"http://www.last.fm/api/auth/?api_key={config.LASTFM_API_KEY}"
@@ -3142,6 +3147,13 @@ async def setup_scrobbling(interaction: discord.Interaction, username: str):
     """Set up Last.fm scrobbling for a user."""
     await interaction.response.defer(ephemeral=True)
     
+    if not PYLAST_AVAILABLE:
+        await interaction.followup.send(
+            "❌ **Last.fm scrobbling is not available.**\n"
+            "The `pylast` library is not installed."
+        )
+        return
+    
     if not config.LASTFM_API_KEY or not config.LASTFM_API_SECRET:
         await interaction.followup.send(
             "❌ **Last.fm scrobbling is not configured on this bot.**\n"
@@ -3231,7 +3243,7 @@ class ScrobbleAuthView(discord.ui.View):
         # Set the authorization URL for the button
         self.authorize_lastfm.url = auth_url
     
-    @discord.ui.button(label="Authorize Last.fm", style=discord.ButtonStyle.link, url="", emoji="🔗")
+    @discord.ui.button(label="Authorize Last.fm", style=discord.ButtonStyle.link, emoji="🔗")
     async def authorize_lastfm(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Button to authorize with Last.fm."""
         # This is a link button, so it opens Last.fm in browser
