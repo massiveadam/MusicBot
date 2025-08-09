@@ -5,6 +5,9 @@ import os
 import asyncio
 import aiohttp
 from pathlib import Path
+import uuid
+from typing import Dict, List, Optional
+import time
 
 import subprocess
 import requests
@@ -25,7 +28,8 @@ import datetime
 import logging
 import urllib.parse
 
-# Configuration management
+
+# Configuration management - this is a test
 class Config:
     """Configuration class for the Discord bot."""
     
@@ -57,6 +61,150 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+# Listening Room Classes
+class ListeningRoom:
+    """Represents an active listening room session."""
+    
+    def __init__(self, host: discord.Member, guild: discord.Guild, artist: str, album: str, source_type: str, source_data: str):
+        self.room_id = str(uuid.uuid4())[:8]  # Short ID for easy reference
+        self.host = host
+        self.guild = guild
+        self.artist = artist
+        self.album = album
+        self.source_type = source_type  # 'local' or 'apple_music'
+        self.source_data = source_data  # file path or URL
+        
+        # Channels
+        self.voice_channel: Optional[discord.VoiceChannel] = None
+        self.text_channel: Optional[discord.TextChannel] = None
+        self.voice_client: Optional[discord.VoiceClient] = None
+        
+        # Participants
+        self.participants: List[discord.Member] = [host]
+        self.max_participants = 5
+        
+        # Playback state
+        self.current_track = 0
+        self.tracks: List[Dict] = []  # List of track info dicts
+        self.is_playing = False
+        self.start_time = None
+        self.pause_time = None
+        
+        # Created timestamp
+        self.created_at = time.time()
+        
+    @property
+    def is_full(self) -> bool:
+        return len(self.participants) >= self.max_participants
+        
+    @property
+    def current_track_info(self) -> Optional[Dict]:
+        if 0 <= self.current_track < len(self.tracks):
+            return self.tracks[self.current_track]
+        return None
+        
+    def add_participant(self, member: discord.Member) -> bool:
+        """Add a participant to the room. Returns True if successful."""
+        if member in self.participants:
+            return False
+        if self.is_full:
+            return False
+        self.participants.append(member)
+        return True
+        
+    def remove_participant(self, member: discord.Member) -> bool:
+        """Remove a participant from the room. Returns True if successful."""
+        if member in self.participants:
+            self.participants.remove(member)
+            return True
+        return False
+
+
+class ListeningRoomManager:
+    """Manages all active listening rooms."""
+    
+    def __init__(self):
+        self.rooms: Dict[str, ListeningRoom] = {}  # room_id -> ListeningRoom
+        self.user_rooms: Dict[int, str] = {}  # user_id -> room_id
+        
+    def create_room(self, host: discord.Member, guild: discord.Guild, artist: str, album: str, source_type: str, source_data: str) -> ListeningRoom:
+        """Create a new listening room."""
+        # Remove user from any existing room first
+        self.leave_room(host)
+        
+        room = ListeningRoom(host, guild, artist, album, source_type, source_data)
+        self.rooms[room.room_id] = room
+        self.user_rooms[host.id] = room.room_id
+        
+        logger.info(f"Created listening room {room.room_id} for {artist} - {album}")
+        return room
+        
+    def get_room(self, room_id: str) -> Optional[ListeningRoom]:
+        """Get a room by ID."""
+        return self.rooms.get(room_id)
+        
+    def get_user_room(self, user_id: int) -> Optional[ListeningRoom]:
+        """Get the room a user is currently in."""
+        room_id = self.user_rooms.get(user_id)
+        if room_id:
+            return self.rooms.get(room_id)
+        return None
+        
+    def join_room(self, room_id: str, member: discord.Member) -> bool:
+        """Add a user to a room. Returns True if successful."""
+        room = self.get_room(room_id)
+        if not room:
+            return False
+            
+        # Remove from current room first
+        self.leave_room(member)
+        
+        if room.add_participant(member):
+            self.user_rooms[member.id] = room_id
+            logger.info(f"User {member.name} joined room {room_id}")
+            return True
+        return False
+        
+    def leave_room(self, member: discord.Member) -> Optional[str]:
+        """Remove a user from their current room. Returns room_id if they were in one."""
+        current_room_id = self.user_rooms.get(member.id)
+        if not current_room_id:
+            return None
+            
+        room = self.rooms.get(current_room_id)
+        if room:
+            room.remove_participant(member)
+            del self.user_rooms[member.id]
+            
+            # If room is empty, clean it up
+            if len(room.participants) == 0:
+                self.cleanup_room(current_room_id)
+                
+            logger.info(f"User {member.name} left room {current_room_id}")
+            return current_room_id
+        return None
+        
+    def cleanup_room(self, room_id: str):
+        """Clean up an empty room."""
+        room = self.rooms.get(room_id)
+        if room:
+            # Clean up any remaining user mappings
+            users_to_remove = [user_id for user_id, rid in self.user_rooms.items() if rid == room_id]
+            for user_id in users_to_remove:
+                del self.user_rooms[user_id]
+                
+            del self.rooms[room_id]
+            logger.info(f"Cleaned up room {room_id}")
+            
+    def get_all_rooms(self) -> List[ListeningRoom]:
+        """Get all active rooms."""
+        return list(self.rooms.values())
+
+
+# Global room manager
+room_manager = ListeningRoomManager()
 
 intents = discord.Intents.default()
 intents.message_content = True  # Required for reading mentions in messages
@@ -1429,6 +1577,307 @@ async def scheduled_hotupdates():
 @scheduled_hotupdates.before_loop
 async def before_scheduled_hotupdates():
     await bot.wait_until_ready()
+
+
+# ==================== LISTENING ROOM COMMANDS ====================
+
+@bot.tree.command(name="golive", description="Start a listening room for an album")
+@app_commands.describe(
+    source="Album name to search in your library OR Apple Music URL",
+    album_name="Specific album name if searching library"
+)
+async def golive(interaction: discord.Interaction, source: str, album_name: str = None):
+    """Start a listening room with an album."""
+    await interaction.response.defer(thinking=True)
+    
+    try:
+        # Check if user is already in a room
+        current_room = room_manager.get_user_room(interaction.user.id)
+        if current_room:
+            await interaction.followup.send(f"❌ You're already in listening room `{current_room.room_id}`. Leave it first with `/leave`.")
+            return
+        
+        # Determine source type and get metadata
+        if "music.apple.com" in source or "spotify.com" in source:
+            # Apple Music or Spotify URL
+            try:
+                if "spotify.com" in source:
+                    # Convert Spotify to Apple Music
+                    apple_url = await fetch_apple_url(source)
+                    if not apple_url:
+                        await interaction.followup.send("❌ Could not convert Spotify URL to Apple Music.")
+                        return
+                    source = apple_url
+                
+                metadata = await extract_metadata(source)
+                artist = metadata.get("artist", "Unknown Artist")
+                album = metadata.get("album", "Unknown Album")
+                source_type = "apple_music"
+                source_data = source
+                
+            except Exception as e:
+                logger.error(f"Failed to extract metadata from URL: {e}")
+                await interaction.followup.send("❌ Failed to get album information from that URL.")
+                return
+                
+        else:
+            # Search local library
+            if not config.PLEX_TOKEN or not config.PLEX_URL:
+                await interaction.followup.send("❌ Plex integration not configured for local library search.")
+                return
+            
+            search_query = f"{source} {album_name}" if album_name else source
+            
+            # Search Plex for the album
+            headers = {"X-Plex-Token": config.PLEX_TOKEN}
+            sanitized_query = sanitize_query(search_query)
+            search_url = f"{config.PLEX_URL}/library/search?query={sanitized_query}"
+            
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(search_url, headers=headers) as response:
+                        if response.status != 200:
+                            await interaction.followup.send("❌ Failed to search your music library.")
+                            return
+                        xml = await response.text()
+                
+                root = ET.fromstring(xml)
+                albums = []
+                
+                for elem in root.findall(".//Directory") + root.findall(".//Video"):
+                    if elem.attrib.get("type") != "album":
+                        continue
+                    
+                    title = elem.attrib.get("title", "")
+                    artist_name = elem.attrib.get("parentTitle", "")
+                    key = elem.attrib.get("key", "")
+                    
+                    albums.append({
+                        "title": title,
+                        "artist": artist_name,
+                        "key": key,
+                        "combined": f"{artist_name} - {title}"
+                    })
+                
+                if not albums:
+                    await interaction.followup.send(f"❌ No albums found for '{search_query}' in your library.")
+                    return
+                
+                # Use the best match
+                best_album = albums[0]
+                artist = best_album["artist"]
+                album = best_album["title"]
+                source_type = "local"
+                source_data = best_album["key"]
+                
+            except Exception as e:
+                logger.error(f"Failed to search Plex library: {e}")
+                await interaction.followup.send("❌ Failed to search your music library.")
+                return
+        
+        # Create the listening room
+        room = room_manager.create_room(
+            host=interaction.user,
+            guild=interaction.guild,
+            artist=artist,
+            album=album,
+            source_type=source_type,
+            source_data=source_data
+        )
+        
+        # Create voice channel
+        voice_channel_name = f"🎵 {album} - {interaction.user.display_name}"
+        category = None  # You can set a specific category if you want
+        
+        try:
+            room.voice_channel = await interaction.guild.create_voice_channel(
+                name=voice_channel_name,
+                category=category,
+                user_limit=room.max_participants
+            )
+            
+            # Create persistent text channel
+            text_channel_name = f"💬-{album.lower().replace(' ', '-')}-chat"
+            room.text_channel = await interaction.guild.create_text_channel(
+                name=text_channel_name,
+                category=category,
+                topic=f"Chat for listening to {artist} - {album} | Room ID: {room.room_id}"
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to create channels: {e}")
+            room_manager.cleanup_room(room.room_id)
+            await interaction.followup.send("❌ Failed to create voice/text channels.")
+            return
+        
+        # Create room announcement embed
+        embed = discord.Embed(
+            title=f"🎵 Listening Room Created",
+            description=f"**{artist} - {album}**\n\nRoom ID: `{room.room_id}`\n\nAnyone can join and control the music!",
+            color=discord.Color.purple()
+        )
+        embed.add_field(
+            name="🎧 Voice Channel", 
+            value=room.voice_channel.mention, 
+            inline=True
+        )
+        embed.add_field(
+            name="💬 Chat Channel", 
+            value=room.text_channel.mention, 
+            inline=True
+        )
+        embed.add_field(
+            name="👥 Participants", 
+            value=f"1/{room.max_participants}", 
+            inline=True
+        )
+        embed.set_footer(text=f"Host: {interaction.user.display_name}")
+        
+        # Create join button
+        view = discord.ui.View()
+        join_button = discord.ui.Button(
+            label="🎧 Join Room",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"join_room:{room.room_id}"
+        )
+        view.add_item(join_button)
+        
+        await interaction.followup.send(embed=embed, view=view)
+        
+        # Send initial message to the text channel
+        welcome_msg = f"🎵 **Welcome to the listening room for {artist} - {album}!**\n\n"
+        welcome_msg += f"• Join the voice channel: {room.voice_channel.mention}\n"
+        welcome_msg += f"• Anyone can control the music using reactions or commands\n"
+        welcome_msg += f"• Room ID: `{room.room_id}`"
+        
+        await room.text_channel.send(welcome_msg)
+        
+        logger.info(f"Successfully created listening room {room.room_id} for {artist} - {album}")
+        
+    except Exception as e:
+        logger.error(f"Error in /golive command: {e}")
+        await interaction.followup.send("❌ An error occurred while creating the listening room.")
+
+
+@bot.tree.command(name="join", description="Join a listening room")
+@app_commands.describe(room_id="Room ID to join")
+async def join_room_command(interaction: discord.Interaction, room_id: str):
+    """Join an existing listening room."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    # Check if user is already in a room
+    current_room = room_manager.get_user_room(interaction.user.id)
+    if current_room:
+        await interaction.followup.send(f"❌ You're already in room `{current_room.room_id}`. Leave it first with `/leave`.")
+        return
+    
+    # Try to join the room
+    success = room_manager.join_room(room_id, interaction.user)
+    if not success:
+        room = room_manager.get_room(room_id)
+        if not room:
+            await interaction.followup.send(f"❌ Room `{room_id}` not found.")
+        elif room.is_full:
+            await interaction.followup.send(f"❌ Room `{room_id}` is full ({room.max_participants}/{room.max_participants}).")
+        else:
+            await interaction.followup.send(f"❌ Failed to join room `{room_id}`.")
+        return
+    
+    room = room_manager.get_room(room_id)
+    await interaction.followup.send(f"✅ Joined listening room for **{room.artist} - {room.album}**!\n\nVoice: {room.voice_channel.mention}\nChat: {room.text_channel.mention}")
+    
+    # Announce in the text channel
+    if room.text_channel:
+        await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})")
+
+
+@bot.tree.command(name="leave", description="Leave your current listening room")
+async def leave_room_command(interaction: discord.Interaction):
+    """Leave the current listening room."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    room_id = room_manager.leave_room(interaction.user)
+    if not room_id:
+        await interaction.followup.send("❌ You're not in any listening room.")
+        return
+    
+    await interaction.followup.send(f"✅ Left listening room `{room_id}`.")
+
+
+@bot.tree.command(name="rooms", description="List all active listening rooms")
+async def list_rooms(interaction: discord.Interaction):
+    """List all active listening rooms."""
+    await interaction.response.defer(thinking=True)
+    
+    rooms = room_manager.get_all_rooms()
+    if not rooms:
+        await interaction.followup.send("🔇 No active listening rooms right now.")
+        return
+    
+    embed = discord.Embed(
+        title="🎵 Active Listening Rooms",
+        color=discord.Color.blue()
+    )
+    
+    for room in rooms:
+        status = "🎵 Playing" if room.is_playing else "⏸️ Paused"
+        participants = ", ".join([p.display_name for p in room.participants])
+        
+        embed.add_field(
+            name=f"`{room.room_id}` - {room.artist} - {room.album}",
+            value=f"Host: {room.host.display_name}\n"
+                  f"Participants ({len(room.participants)}/{room.max_participants}): {participants}\n"
+                  f"Status: {status}\n"
+                  f"Voice: {room.voice_channel.mention if room.voice_channel else 'None'}",
+            inline=False
+        )
+    
+    await interaction.followup.send(embed=embed)
+
+
+# Handle button interactions for joining rooms
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    """Handle button clicks and other interactions."""
+    if interaction.type != discord.InteractionType.component:
+        return
+    
+    if interaction.data.get("custom_id", "").startswith("join_room:"):
+        room_id = interaction.data["custom_id"].split(":", 1)[1]
+        
+        # Check if user is already in a room
+        current_room = room_manager.get_user_room(interaction.user.id)
+        if current_room:
+            await interaction.response.send_message(
+                f"❌ You're already in room `{current_room.room_id}`. Leave it first with `/leave`.",
+                ephemeral=True
+            )
+            return
+        
+        # Try to join the room
+        success = room_manager.join_room(room_id, interaction.user)
+        if not success:
+            room = room_manager.get_room(room_id)
+            if not room:
+                await interaction.response.send_message(f"❌ Room `{room_id}` not found.", ephemeral=True)
+            elif room.is_full:
+                await interaction.response.send_message(f"❌ Room is full ({room.max_participants}/{room.max_participants}).", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ Failed to join room.", ephemeral=True)
+            return
+        
+        room = room_manager.get_room(room_id)
+        await interaction.response.send_message(
+            f"✅ Joined listening room for **{room.artist} - {room.album}**!\n\nVoice: {room.voice_channel.mention}\nChat: {room.text_channel.mention}",
+            ephemeral=True
+        )
+        
+        # Announce in the text channel
+        if room.text_channel:
+            await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})")
+
+
+# ==================== END LISTENING ROOM COMMANDS ====================
 
 
 # Add missing functions for reaction handling
