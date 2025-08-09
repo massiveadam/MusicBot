@@ -613,12 +613,54 @@ class ScrobbleManager:
         
         return updated_users
     
-    def get_auth_url(self) -> Optional[str]:
-        """Get Last.fm authentication URL."""
+    async def get_auth_url(self) -> Optional[str]:
+        """Get Last.fm authentication URL with proper token flow."""
         if not PYLAST_AVAILABLE or not config.LASTFM_API_KEY:
             return None
         
-        return f"http://www.last.fm/api/auth/?api_key={config.LASTFM_API_KEY}"
+        try:
+            # First, get a request token from Last.fm
+            network = pylast.LastFMNetwork(
+                api_key=config.LASTFM_API_KEY,
+                api_secret=config.LASTFM_API_SECRET
+            )
+            
+            # Get request token
+            token = await asyncio.get_event_loop().run_in_executor(
+                None,
+                network.get_request_token
+            )
+            
+            # Return proper auth URL with token
+            return f"https://www.last.fm/api/auth/?api_key={config.LASTFM_API_KEY}&token={token}"
+            
+        except Exception as e:
+            logger.error(f"Failed to get Last.fm auth token: {e}")
+            return None
+    
+    async def get_session_key(self, token: str) -> Optional[str]:
+        """Exchange an authorized token for a session key."""
+        if not PYLAST_AVAILABLE or not config.LASTFM_API_KEY:
+            return None
+        
+        try:
+            network = pylast.LastFMNetwork(
+                api_key=config.LASTFM_API_KEY,
+                api_secret=config.LASTFM_API_SECRET
+            )
+            
+            # Exchange token for session key
+            session_key = await asyncio.get_event_loop().run_in_executor(
+                None,
+                network.get_web_auth_session_key,
+                token
+            )
+            
+            return session_key
+            
+        except Exception as e:
+            logger.error(f"Failed to get Last.fm session key: {e}")
+            return None
 
 
 class ListeningRoomManager:
@@ -3161,8 +3203,8 @@ async def setup_scrobbling(interaction: discord.Interaction, username: str):
         )
         return
     
-    # Generate auth URL
-    auth_url = scrobble_manager.get_auth_url()
+    # Generate auth URL (now async)
+    auth_url = await scrobble_manager.get_auth_url()
     if not auth_url:
         await interaction.followup.send("❌ Failed to generate Last.fm authentication URL.")
         return
@@ -3258,31 +3300,80 @@ class ScrobbleAuthView(discord.ui.View):
         
         await interaction.response.defer(ephemeral=True)
         
-        # This is a simplified version - in a full implementation, you'd need to:
-        # 1. Get the auth token from Last.fm after user authorization
-        # 2. Exchange it for a session key
-        # For now, we'll show instructions for manual setup
-        
-        embed = discord.Embed(
-            title="🎵 Manual Setup Required",
-            description=(
-                "**To complete scrobbling setup:**\n\n"
-                "1. After authorizing, you'll get a token from Last.fm\n"
-                "2. Ask a bot admin to add your session key manually\n"
-                "3. This will be automated in a future update!\n\n"
-                f"**Your Username:** {self.username}"
-            ),
-            color=0xff9900
-        )
-        embed.set_footer(text="Sorry for the manual step - full OAuth flow coming soon!")
-        
-        await interaction.followup.send(embed=embed)
+        # Get the token from the authorization URL and exchange for session key
+        try:
+            # For now, we need the user to provide the token manually
+            # In a full implementation, we'd capture this from a callback URL
+            embed = discord.Embed(
+                title="🎵 Almost Done!",
+                description=(
+                    "**Step 1:** Click the authorize button above if you haven't already\n"
+                    "**Step 2:** After authorizing on Last.fm, look for a token in the URL\n"
+                    "**Step 3:** Use `/scrobble_token <token>` with that token to complete setup\n\n"
+                    f"**Username:** {self.username}\n\n"
+                    "*The token will be in the URL after authorization like:*\n"
+                    "`...&token=abc123def456...`"
+                ),
+                color=0xff9900
+            )
+            embed.set_footer(text="Looking for the token in the URL after you authorize!")
+            
+            await interaction.followup.send(embed=embed)
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ Setup error: {e}", ephemeral=True)
 
 
 @bot.tree.command(name="test_new_command", description="Test if new commands are working")
 async def test_new_command(interaction: discord.Interaction):
     """Test command to verify new commands are being registered."""
     await interaction.response.send_message("✅ New commands are working! Scrobbling commands should be available too.", ephemeral=True)
+
+
+@bot.tree.command(name="scrobble_token", description="Complete Last.fm setup with your authorization token")
+@app_commands.describe(token="The token from Last.fm after authorization")
+async def complete_scrobble_setup(interaction: discord.Interaction, token: str):
+    """Complete scrobbling setup using the authorization token."""
+    await interaction.response.defer(ephemeral=True)
+    
+    if not PYLAST_AVAILABLE:
+        await interaction.followup.send("❌ Last.fm scrobbling is not available.")
+        return
+    
+    try:
+        # Exchange token for session key
+        session_key = await scrobble_manager.get_session_key(token)
+        if not session_key:
+            await interaction.followup.send("❌ Failed to exchange token for session key. Make sure you authorized the application first.")
+            return
+        
+        # We need the username - for now, let's get it from Last.fm
+        network = pylast.LastFMNetwork(
+            api_key=config.LASTFM_API_KEY,
+            api_secret=config.LASTFM_API_SECRET,
+            session_key=session_key
+        )
+        
+        # Get the user's Last.fm username
+        user_info = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: network.get_authenticated_user()
+        )
+        username = user_info.name
+        
+        # Add the user to our scrobbling system
+        scrobble_manager.add_user(interaction.user.id, username, session_key)
+        
+        embed = discord.Embed(
+            title="✅ Last.fm Scrobbling Enabled!",
+            description=f"**Username:** {username}\n**Status:** Ready to scrobble!\n\nYour listening activity in rooms will now be automatically scrobbled to Last.fm.",
+            color=0x00ff00
+        )
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Failed to complete scrobble setup: {e}")
+        await interaction.followup.send(f"❌ Failed to complete setup: {e}")
 
 
 @bot.tree.command(name="scrobble_add_user", description="[Admin] Manually add a user's Last.fm session key")
