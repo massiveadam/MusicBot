@@ -276,7 +276,7 @@ class ListeningRoom:
             return False
     
     async def connect_voice(self) -> bool:
-        """Connect to the voice channel."""
+        """Connect to the voice channel with improved error handling."""
         if not self.voice_channel:
             logger.error("No voice channel to connect to")
             return False
@@ -288,20 +288,37 @@ class ListeningRoom:
                 return True
                 
             logger.info(f"Connecting to voice channel: {self.voice_channel.name}")
-            # Connect with high quality settings
-            self.voice_client = await self.voice_channel.connect(
-                reconnect=True, 
-                timeout=30.0,
-                cls=discord.voice_client.VoiceClient  # Use default high-quality voice client
-            )
             
-            if self.voice_client and self.voice_client.is_connected():
-                logger.info(f"Successfully connected to voice channel in room {self.room_id}")
-                return True
-            else:
-                logger.error("Voice client not connected after connection attempt")
-                return False
-                
+            # Try connection with retry logic for Discord error 4006
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Connect with high quality settings
+                    self.voice_client = await self.voice_channel.connect(
+                        reconnect=True, 
+                        timeout=30.0,
+                        cls=discord.voice_client.VoiceClient  # Use default high-quality voice client
+                    )
+                    
+                    if self.voice_client and self.voice_client.is_connected():
+                        logger.info(f"Successfully connected to voice channel in room {self.room_id}")
+                        return True
+                    else:
+                        logger.error("Voice client not connected after connection attempt")
+                        return False
+                        
+                except discord.errors.ConnectionClosed as e:
+                    if e.code == 4006 and attempt < max_retries - 1:
+                        logger.warning(f"Discord connection error 4006 (attempt {attempt + 1}/{max_retries}), retrying in 2 seconds...")
+                        await asyncio.sleep(2)
+                        continue
+                    else:
+                        logger.error(f"Failed to connect after {max_retries} attempts: {e}")
+                        return False
+                except Exception as e:
+                    logger.error(f"Unexpected error during voice connection: {type(e).__name__}: {e}")
+                    return False
+                    
         except Exception as e:
             logger.error(f"Failed to connect to voice channel: {type(e).__name__}: {e}")
             return False
@@ -2629,11 +2646,11 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         category = None  # You can set a specific category if you want
         
         try:
-            # Set up permissions for listening room - default mics muted for focused listening
+            # Set up permissions for listening room - everyone can speak by default
             overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(
-                    speak=False,  # Mute mics by default
-                    use_voice_activation=False  # Disable voice activation
+                    speak=True,  # Allow everyone to speak by default
+                    use_voice_activation=True  # Enable voice activation
                 ),
                 interaction.guild.me: discord.PermissionOverwrite(
                     speak=True,  # Bot can speak (for music)
@@ -2666,7 +2683,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         # Create room announcement embed
         embed = discord.Embed(
             title=f"🎵 Listening Room Created",
-            description=f"**{artist} - {album}**\n\nRoom ID: `{room.room_id}`\n\nAnyone can join and control the music!\n🔇 *Mics muted by default for focused listening*",
+            description=f"**{artist} - {album}**\n\nRoom ID: `{room.room_id}`\n\nAnyone can join and control the music!\n🎤 *Everyone can speak by default*",
             color=discord.Color.purple()
         )
         embed.add_field(
