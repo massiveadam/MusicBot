@@ -3240,14 +3240,14 @@ class ScrobbleAuthView(discord.ui.View):
         self.user_id = user_id
         self.username = username
         
-        # Set the authorization URL for the button
-        self.authorize_lastfm.url = auth_url
-    
-    @discord.ui.button(label="Authorize Last.fm", style=discord.ButtonStyle.link, emoji="🔗")
-    async def authorize_lastfm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Button to authorize with Last.fm."""
-        # This is a link button, so it opens Last.fm in browser
-        pass
+        # Create the link button manually
+        link_button = discord.ui.Button(
+            label="Authorize Last.fm",
+            style=discord.ButtonStyle.link,
+            url=auth_url,
+            emoji="🔗"
+        )
+        self.add_item(link_button)
     
     @discord.ui.button(label="Complete Setup", style=discord.ButtonStyle.green, emoji="✅")
     async def complete_setup(self, interaction: discord.Interaction, button: discord.ui.Button):
