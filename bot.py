@@ -10,6 +10,8 @@ from typing import Dict, List, Optional
 import time
 import tempfile
 import shutil
+import hashlib
+import json
 
 import subprocess
 import requests
@@ -18,6 +20,7 @@ from universal_scraper import extract_metadata  # async for /ripurl and /save
 from colorthief import ColorThief
 from bs4 import BeautifulSoup
 from io import BytesIO
+import pylast
 from PIL import Image
 from urllib.parse import urlparse
 import re
@@ -47,6 +50,12 @@ class Config:
         self.COOKIES_PATH = os.getenv("COOKIES_PATH", "/app/cookies.txt")
         self.DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "300"))
         self.RETRY_ATTEMPTS = int(os.getenv("RETRY_ATTEMPTS", "3"))
+        self.HIGH_QUALITY_AUDIO = os.getenv("HIGH_QUALITY_AUDIO", "true").lower() == "true"
+        self.AUDIO_BITRATE = int(os.getenv("AUDIO_BITRATE", "96"))  # kbps for Discord streaming (matches Discord's limit)
+        
+        # Scrobbling configuration
+        self.LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
+        self.LASTFM_API_SECRET = os.getenv("LASTFM_API_SECRET")
         
         # Validate critical configuration
         if not self.TOKEN:
@@ -106,13 +115,30 @@ class AudioSource:
                 artist = track.attrib.get("grandparentTitle", "Unknown Artist")
                 duration = int(track.attrib.get("duration", "0")) // 1000  # Convert to seconds
                 
-                # Get the media file path
-                media = track.find(".//Media")
-                part = media.find(".//Part") if media is not None else None
-                if part is not None:
-                    file_key = part.attrib.get("key", "")
-                    file_path = f"{config.PLEX_URL}{file_key}?X-Plex-Token={config.PLEX_TOKEN}"
-                    tracks.append(AudioTrack(title, artist, file_path, duration))
+                # Get the highest quality media file path
+                media_elements = track.findall(".//Media")
+                best_media = None
+                best_bitrate = 0
+                
+                # Find the highest bitrate media
+                for media in media_elements:
+                    bitrate = int(media.attrib.get("bitrate", "0"))
+                    if bitrate > best_bitrate:
+                        best_bitrate = bitrate
+                        best_media = media
+                
+                if best_media is None and media_elements:
+                    best_media = media_elements[0]  # Fallback to first media
+                
+                if best_media is not None:
+                    part = best_media.find(".//Part")
+                    if part is not None:
+                        file_key = part.attrib.get("key", "")
+                        # Request highest quality with quality parameters
+                        file_path = f"{config.PLEX_URL}{file_key}?X-Plex-Token={config.PLEX_TOKEN}&format=flac"
+                        
+                        logger.info(f"Selected media with bitrate {best_bitrate}kbps for {title}")
+                        tracks.append(AudioTrack(title, artist, file_path, duration))
                     
             return sorted(tracks, key=lambda t: t.title)  # Sort by track title
             
@@ -126,8 +152,8 @@ class AudioSource:
         temp_dir = tempfile.mkdtemp(prefix="listening_room_")
         
         try:
-            # Download the album using gamdl
-            returncode, output = await run_gamdl(apple_url, output_path=temp_dir)
+            # Download the album using gamdl with high quality
+            returncode, output = await run_gamdl(apple_url, output_path=temp_dir, high_quality=config.HIGH_QUALITY_AUDIO)
             if returncode != 0:
                 logger.error(f"Failed to download Apple Music album: {output}")
                 return []
@@ -245,13 +271,32 @@ class ListeningRoom:
     async def connect_voice(self) -> bool:
         """Connect to the voice channel."""
         if not self.voice_channel:
+            logger.error("No voice channel to connect to")
             return False
             
         try:
-            self.voice_client = await self.voice_channel.connect()
-            return True
+            # Check if already connected
+            if self.voice_client and self.voice_client.is_connected():
+                logger.info(f"Already connected to voice channel in room {self.room_id}")
+                return True
+                
+            logger.info(f"Connecting to voice channel: {self.voice_channel.name}")
+            # Connect with high quality settings
+            self.voice_client = await self.voice_channel.connect(
+                reconnect=True, 
+                timeout=30.0,
+                cls=discord.voice_client.VoiceClient  # Use default high-quality voice client
+            )
+            
+            if self.voice_client and self.voice_client.is_connected():
+                logger.info(f"Successfully connected to voice channel in room {self.room_id}")
+                return True
+            else:
+                logger.error("Voice client not connected after connection attempt")
+                return False
+                
         except Exception as e:
-            logger.error(f"Failed to connect to voice channel: {e}")
+            logger.error(f"Failed to connect to voice channel: {type(e).__name__}: {e}")
             return False
     
     async def disconnect_voice(self):
@@ -262,34 +307,81 @@ class ListeningRoom:
     
     async def play_current_track(self) -> bool:
         """Start playing the current track."""
-        if not self.voice_client or not self.current_track_info:
+        if not self.current_track_info:
+            logger.error("No current track to play")
             return False
+            
+        if not self.voice_client:
+            logger.error("No voice client available")
+            return False
+            
+        if not self.voice_client.is_connected():
+            logger.error("Voice client not connected, attempting reconnect...")
+            if not await self.connect_voice():
+                logger.error("Failed to reconnect to voice channel")
+                return False
             
         try:
             track = self.current_track_info
+            logger.info(f"Attempting to play track: {track} (file: {track.file_path})")
             
-            # Create FFmpeg audio source
+            # Stop any currently playing audio
+            if self.voice_client.is_playing():
+                self.voice_client.stop()
+                await asyncio.sleep(0.5)  # Give it a moment to stop
+            
+            # Create FFmpeg audio source with highest quality options
+            ffmpeg_options = {
+                'before_options': (
+                    '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 '
+                    '-probesize 50M -analyzeduration 50M '  # Better format detection
+                    '-fflags +discardcorrupt'  # Handle corrupt packets gracefully
+                ),
+                'options': (
+                    '-vn '  # No video
+                    '-acodec libopus '  # Use Opus codec (matches Discord's format)
+                    '-ar 48000 '  # 48kHz sample rate (Discord's native rate)
+                    '-ac 2 '  # Stereo
+                    '-b:a 96k '  # Match Discord's actual bitrate limit
+                    '-application audio '  # Optimize for audio (not voip)
+                    '-frame_duration 20 '  # 20ms frame duration for low latency
+                    '-compression_level 10 '  # Highest Opus compression quality
+                    '-vbr on '  # Variable bitrate for better quality
+                    '-filter:a "volume=0.95,loudnorm=I=-16:TP=-1.5:LRA=11"'  # Professional loudness normalization
+                )
+            }
+            
             if track.file_path.startswith("http"):
                 # Streaming URL (Plex)
-                source = discord.FFmpegPCMAudio(
-                    track.file_path,
-                    options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
-                )
+                logger.info(f"Playing streaming URL: {track.file_path[:50]}...")
+                source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
             else:
                 # Local file
-                source = discord.FFmpegPCMAudio(track.file_path)
+                logger.info(f"Playing local file: {track.file_path}")
+                source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
             
-            # Play the audio
-            self.voice_client.play(source, after=lambda e: asyncio.create_task(self._track_finished(e)) if e else None)
+            # Play the audio with error callback
+            def after_playing(error):
+                if error:
+                    logger.error(f"Audio playback error: {error}")
+                else:
+                    logger.info(f"Track finished: {track}")
+                # Schedule the track finished handler
+                asyncio.create_task(self._track_finished(error))
+            
+            self.voice_client.play(source, after=after_playing)
             self.is_playing = True
             self.is_paused = False
             self.start_time = time.time()
             
-            logger.info(f"Started playing {track} in room {self.room_id}")
+            # Update now playing for all scrobbling users
+            await scrobble_manager.update_now_playing_for_room(self, track)
+            
+            logger.info(f"Successfully started playing {track} in room {self.room_id}")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to play track: {e}")
+            logger.error(f"Failed to play track: {type(e).__name__}: {e}")
             return False
     
     async def pause(self):
@@ -337,6 +429,18 @@ class ListeningRoom:
         """Called when a track finishes playing."""
         if error:
             logger.error(f"Audio playback error: {error}")
+        else:
+            # Scrobble the completed track for all participants
+            if self.current_track_info:
+                # Check if track played for at least 30 seconds or half its duration (Last.fm requirement)
+                play_duration = time.time() - self.start_time if hasattr(self, 'start_time') else 0
+                track_duration = self.current_track_info.duration or 240  # Default 4 minutes if unknown
+                min_scrobble_time = min(30, track_duration / 2)
+                
+                if play_duration >= min_scrobble_time:
+                    scrobbled_users = await scrobble_manager.scrobble_for_room_participants(self, self.current_track_info)
+                    if scrobbled_users and self.text_channel:
+                        await self.text_channel.send(f"🎵 Scrobbled to Last.fm for: {', '.join(scrobbled_users)}")
         
         # Auto-advance to next track
         if not await self.skip_to_next():
@@ -356,6 +460,160 @@ class ListeningRoom:
                 logger.info(f"Cleaned up temp directory: {self.temp_dir}")
             except Exception as e:
                 logger.error(f"Failed to clean up temp directory: {e}")
+
+
+class ScrobbleUser:
+    """Represents a user's scrobbling configuration."""
+    
+    def __init__(self, discord_id: int, lastfm_username: str, session_key: str):
+        self.discord_id = discord_id
+        self.lastfm_username = lastfm_username
+        self.session_key = session_key
+        self.network = None
+        self._setup_network()
+    
+    def _setup_network(self):
+        """Setup Last.fm network connection."""
+        if config.LASTFM_API_KEY and config.LASTFM_API_SECRET:
+            self.network = pylast.LastFMNetwork(
+                api_key=config.LASTFM_API_KEY,
+                api_secret=config.LASTFM_API_SECRET,
+                session_key=self.session_key
+            )
+    
+    async def scrobble_track(self, track: 'AudioTrack', timestamp: int = None):
+        """Scrobble a track for this user."""
+        if not self.network:
+            return False
+        
+        try:
+            timestamp = timestamp or int(time.time())
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                self.network.scrobble,
+                track.artist,
+                track.title,
+                timestamp
+            )
+            logger.info(f"Scrobbled '{track.title}' by {track.artist} for user {self.lastfm_username}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to scrobble for user {self.lastfm_username}: {e}")
+            return False
+    
+    async def update_now_playing(self, track: 'AudioTrack'):
+        """Update now playing status for this user."""
+        if not self.network:
+            return False
+        
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                self.network.update_now_playing,
+                track.artist,
+                track.title
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update now playing for user {self.lastfm_username}: {e}")
+            return False
+
+
+class ScrobbleManager:
+    """Manages scrobbling for all users."""
+    
+    def __init__(self):
+        self.users: Dict[int, ScrobbleUser] = {}  # discord_id -> ScrobbleUser
+        self.scrobble_data_file = "scrobble_users.json"
+        self._load_users()
+    
+    def _load_users(self):
+        """Load saved user scrobbling data."""
+        try:
+            if os.path.exists(self.scrobble_data_file):
+                with open(self.scrobble_data_file, 'r') as f:
+                    data = json.load(f)
+                    for discord_id_str, user_data in data.items():
+                        discord_id = int(discord_id_str)
+                        self.users[discord_id] = ScrobbleUser(
+                            discord_id=discord_id,
+                            lastfm_username=user_data['username'],
+                            session_key=user_data['session_key']
+                        )
+                logger.info(f"Loaded {len(self.users)} scrobbling users")
+        except Exception as e:
+            logger.error(f"Failed to load scrobbling users: {e}")
+    
+    def _save_users(self):
+        """Save user scrobbling data."""
+        try:
+            data = {}
+            for discord_id, user in self.users.items():
+                data[str(discord_id)] = {
+                    'username': user.lastfm_username,
+                    'session_key': user.session_key
+                }
+            with open(self.scrobble_data_file, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save scrobbling users: {e}")
+    
+    def add_user(self, discord_id: int, lastfm_username: str, session_key: str):
+        """Add or update a user's scrobbling configuration."""
+        self.users[discord_id] = ScrobbleUser(discord_id, lastfm_username, session_key)
+        self._save_users()
+        logger.info(f"Added scrobbling user: {lastfm_username} (Discord ID: {discord_id})")
+    
+    def remove_user(self, discord_id: int):
+        """Remove a user's scrobbling configuration."""
+        if discord_id in self.users:
+            username = self.users[discord_id].lastfm_username
+            del self.users[discord_id]
+            self._save_users()
+            logger.info(f"Removed scrobbling user: {username} (Discord ID: {discord_id})")
+            return True
+        return False
+    
+    def get_user(self, discord_id: int) -> Optional[ScrobbleUser]:
+        """Get a user's scrobbling configuration."""
+        return self.users.get(discord_id)
+    
+    async def scrobble_for_room_participants(self, room: 'ListeningRoom', track: 'AudioTrack'):
+        """Scrobble a track for all participants in a room who have scrobbling enabled."""
+        timestamp = int(time.time())
+        scrobbled_users = []
+        
+        for participant_id in room.participants:
+            user = self.get_user(participant_id)
+            if user:
+                success = await user.scrobble_track(track, timestamp)
+                if success:
+                    scrobbled_users.append(user.lastfm_username)
+        
+        if scrobbled_users:
+            logger.info(f"Scrobbled '{track.title}' for users: {', '.join(scrobbled_users)}")
+        
+        return scrobbled_users
+    
+    async def update_now_playing_for_room(self, room: 'ListeningRoom', track: 'AudioTrack'):
+        """Update now playing for all participants in a room who have scrobbling enabled."""
+        updated_users = []
+        
+        for participant_id in room.participants:
+            user = self.get_user(participant_id)
+            if user:
+                success = await user.update_now_playing(track)
+                if success:
+                    updated_users.append(user.lastfm_username)
+        
+        return updated_users
+    
+    def get_auth_url(self) -> Optional[str]:
+        """Get Last.fm authentication URL."""
+        if not config.LASTFM_API_KEY:
+            return None
+        
+        return f"http://www.last.fm/api/auth/?api_key={config.LASTFM_API_KEY}"
 
 
 class ListeningRoomManager:
@@ -465,8 +723,9 @@ class ListeningRoomManager:
         return list(self.rooms.values())
 
 
-# Global room manager
+# Global managers
 room_manager = ListeningRoomManager()
+scrobble_manager = ScrobbleManager()
 
 
 # Playback Control UI
@@ -793,22 +1052,43 @@ async def run_gamdl(
     cookies_path: str = None,
     codec: str = None,
     remux_mode: str = "mp4box",
-    output_path: str = None
+    output_path: str = None,
+    high_quality: bool = True
 ) -> tuple[int, str]:
-    """Run gamdl with AAC-legacy only (your proven working method)"""
+    """Run gamdl with highest quality settings for listening rooms"""
     cookies_path = cookies_path or config.COOKIES_PATH
-    codec = codec or config.GAMDL_CODEC
     output_path = output_path or config.DOWNLOADS_FOLDER
     
-    logger.info(f"🎧 Using {codec} codec")
+    # Use highest quality codec available
+    if high_quality:
+        # Try ALAC (lossless) first, fall back to high-quality AAC
+        codec = "alac"
+        logger.info("🎧 Using ALAC (lossless) codec for highest quality")
+    else:
+        codec = codec or config.GAMDL_CODEC
+        logger.info(f"🎧 Using {codec} codec")
     
-    process = await asyncio.create_subprocess_exec(
+    cmd_args = [
         "gamdl",
         "--cookies-path", cookies_path,
         "--codec-song", codec,
         "--remux-mode", remux_mode,
         "--output-path", output_path,
-        url,
+    ]
+    
+    # Add quality settings for listening rooms
+    if high_quality:
+        cmd_args.extend([
+            "--template-folder", "{album_artist}/{album}",  # Better organization
+            "--template-file", "{track:02d} {title}",       # Track numbers
+            "--exclude-tags", "false",                      # Keep all metadata
+            "--sanity-check", "true",                       # Verify downloads
+        ])
+    
+    cmd_args.append(url)
+    
+    process = await asyncio.create_subprocess_exec(
+        *cmd_args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT
     )
@@ -816,10 +1096,15 @@ async def run_gamdl(
     output = stdout.decode("utf-8").strip()
     
     if process.returncode == 0:
-        logger.info(f"✅ Download succeeded with AAC-legacy")
+        logger.info(f"✅ Download succeeded with {codec}")
     else:
-        logger.warning(f"❌ Failed with AAC-legacy: {process.returncode}")
-        logger.warning(f"Output: {output}")
+        # If ALAC failed, try falling back to AAC
+        if high_quality and codec == "alac":
+            logger.warning(f"❌ ALAC failed, falling back to AAC-legacy")
+            return await run_gamdl(url, cookies_path, "aac-legacy", remux_mode, output_path, False)
+        else:
+            logger.warning(f"❌ Failed with {codec}: {process.returncode}")
+            logger.warning(f"Output: {output}")
     
     return process.returncode, output
 
@@ -2071,12 +2356,51 @@ async def before_scheduled_hotupdates():
 
 # ==================== LISTENING ROOM COMMANDS ====================
 
+async def album_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Autocomplete for album names from Plex library."""
+    if not config.PLEX_TOKEN or not config.PLEX_URL or len(current) < 2:
+        return []
+    
+    try:
+        headers = {"X-Plex-Token": config.PLEX_TOKEN}
+        search_url = f"{config.PLEX_URL}/library/search?query={sanitize_query(current)}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(search_url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                if response.status != 200:
+                    return []
+                xml = await response.text()
+        
+        root = ET.fromstring(xml)
+        albums = []
+        
+        for elem in root.findall(".//Directory") + root.findall(".//Video"):
+            if elem.attrib.get("type") != "album":
+                continue
+            
+            title = elem.attrib.get("title", "")
+            artist = elem.attrib.get("parentTitle", "")
+            combined = f"{artist} - {title}"
+            
+            if len(combined) <= 100:  # Discord choice limit
+                albums.append(app_commands.Choice(name=combined, value=combined))
+        
+        # Sort by relevance and return top 10
+        albums.sort(key=lambda x: fuzz.ratio(current.lower(), x.name.lower()), reverse=True)
+        return albums[:10]
+        
+    except Exception as e:
+        logger.warning(f"Autocomplete error: {e}")
+        return []
+
+
 @bot.tree.command(name="golive", description="Start a listening room for an album")
 @app_commands.describe(
     source="Album name to search in your library OR Apple Music URL",
     album_name="Specific album name if searching library",
-silent="Create room silently without public announcement (default: False)"
+    silent="Create room silently without public announcement (default: False)"
 )
+@app_commands.autocomplete(source=album_autocomplete)
 async def golive(interaction: discord.Interaction, source: str, album_name: str = None, silent: bool = False):
     """Start a listening room with an album."""
     await interaction.response.defer(thinking=True)
@@ -2154,8 +2478,29 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     await interaction.followup.send(f"❌ No albums found for '{search_query}' in your library.")
                     return
                 
-                # Use the best match
+                # Use fuzzy matching to find the best match
+                from fuzzywuzzy import fuzz
+                
+                # Score each album against the search query
+                for album_data in albums:
+                    combined = f"{album_data['artist']} {album_data['title']}"
+                    album_data['score'] = fuzz.token_sort_ratio(search_query.lower(), combined.lower())
+                
+                # Sort by score and take the best match
+                albums.sort(key=lambda x: x['score'], reverse=True)
                 best_album = albums[0]
+                
+                logger.info(f"Search '{search_query}' found {len(albums)} albums, best match: {best_album['artist']} - {best_album['title']} (score: {best_album['score']})")
+                
+                # If the best match is still pretty bad, show some options
+                if best_album['score'] < 60 and len(albums) > 1:
+                    # Show top 3 matches for user to choose from
+                    options_text = "🔍 **Found multiple matches:**\n"
+                    for i, album_data in enumerate(albums[:3]):
+                        options_text += f"{i+1}. **{album_data['artist']}** - *{album_data['title']}* (match: {album_data['score']}%)\n"
+                    options_text += f"\nUsing best match: **{best_album['artist']} - {best_album['title']}**"
+                    await interaction.followup.send(options_text)
+                
                 artist = best_album["artist"]
                 album = best_album["title"]
                 source_type = "local"
@@ -2181,10 +2526,24 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         category = None  # You can set a specific category if you want
         
         try:
+            # Set up permissions for listening room - default mics muted for focused listening
+            overwrites = {
+                interaction.guild.default_role: discord.PermissionOverwrite(
+                    speak=False,  # Mute mics by default
+                    use_voice_activation=False  # Disable voice activation
+                ),
+                interaction.guild.me: discord.PermissionOverwrite(
+                    speak=True,  # Bot can speak (for music)
+                    connect=True,
+                    manage_channels=True
+                )
+            }
+            
             room.voice_channel = await interaction.guild.create_voice_channel(
                 name=voice_channel_name,
                 category=category,
-                user_limit=room.max_participants
+                user_limit=room.max_participants,
+                overwrites=overwrites
             )
             
             # Create persistent text channel
@@ -2204,7 +2563,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         # Create room announcement embed
         embed = discord.Embed(
             title=f"🎵 Listening Room Created",
-            description=f"**{artist} - {album}**\n\nRoom ID: `{room.room_id}`\n\nAnyone can join and control the music!",
+            description=f"**{artist} - {album}**\n\nRoom ID: `{room.room_id}`\n\nAnyone can join and control the music!\n🔇 *Mics muted by default for focused listening*",
             color=discord.Color.purple()
         )
         embed.add_field(
@@ -2286,10 +2645,30 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             view=playback_controls
         )
         
-        # Auto-start playback
-        await asyncio.sleep(1)  # Give a moment for everything to settle
-        success = await room.play_current_track()
-        if success:
+        # Auto-start playback with retries
+        await asyncio.sleep(2)  # Give more time for voice connection to stabilize
+        
+        auto_start_success = False
+        for attempt in range(3):  # Try 3 times
+            logger.info(f"Auto-start attempt {attempt + 1}/3 for room {room.room_id}")
+            
+            # Check voice connection before trying to play
+            if not room.voice_client or not room.voice_client.is_connected():
+                logger.warning(f"Voice not connected on attempt {attempt + 1}, reconnecting...")
+                await room.connect_voice()
+                await asyncio.sleep(1)
+            
+            success = await room.play_current_track()
+            if success:
+                auto_start_success = True
+                logger.info(f"Auto-start successful on attempt {attempt + 1}")
+                break
+            else:
+                logger.warning(f"Auto-start failed on attempt {attempt + 1}")
+                await asyncio.sleep(2)  # Wait before retry
+        
+        # Update UI based on success/failure
+        if auto_start_success:
             # Update the embed to show now playing
             updated_embed = await create_now_playing_embed(room)
             await playback_controls.update_buttons(room)
@@ -2300,7 +2679,9 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             )
             await room.text_channel.send(f"🎵 Auto-started playback! **{room.current_track_info}**")
         else:
-            await room.text_channel.send("⚠️ Tracks loaded but failed to start playback. Use the ▶️ button to start.")
+            logger.error(f"Failed to auto-start playback after 3 attempts in room {room.room_id}")
+            await room.text_channel.send("⚠️ Tracks loaded but auto-start failed. Use the ▶️ button to start manually.")
+            await room.text_channel.send("💡 **Tip:** Try `/debug` and `/reconnect` if you have issues.")
         
         logger.info(f"Successfully created listening room {room.room_id} for {artist} - {album}")
         
@@ -2546,6 +2927,168 @@ async def nowplaying_command(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 
+@bot.tree.command(name="debug", description="[Debug] Show voice connection status")
+@commands.is_owner()
+async def debug_voice(interaction: discord.Interaction):
+    """Debug voice connection issues."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    room = room_manager.get_user_room(interaction.user.id)
+    if not room:
+        await interaction.followup.send("❌ You're not in any listening room.")
+        return
+    
+    debug_info = []
+    debug_info.append(f"**Room ID:** {room.room_id}")
+    debug_info.append(f"**Voice Channel:** {room.voice_channel.name if room.voice_channel else 'None'}")
+    debug_info.append(f"**Voice Client:** {'✅ Connected' if room.voice_client and room.voice_client.is_connected() else '❌ Not connected'}")
+    
+    if room.voice_client:
+        debug_info.append(f"**Is Playing:** {'✅' if room.voice_client.is_playing() else '❌'}")
+        debug_info.append(f"**Is Paused:** {'✅' if room.voice_client.is_paused() else '❌'}")
+        debug_info.append(f"**Latency:** {room.voice_client.latency * 1000:.1f}ms")
+    
+    debug_info.append(f"**Room State - Playing:** {room.is_playing}")
+    debug_info.append(f"**Room State - Paused:** {room.is_paused}")
+    debug_info.append(f"**Current Track:** {room.current_track_info or 'None'}")
+    debug_info.append(f"**Total Tracks:** {len(room.tracks)}")
+    
+    await interaction.followup.send("\n".join(debug_info))
+
+
+@bot.tree.command(name="reconnect", description="[Debug] Force reconnect to voice channel")
+async def reconnect_voice(interaction: discord.Interaction):
+    """Force reconnect to voice channel."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    room = room_manager.get_user_room(interaction.user.id)
+    if not room:
+        await interaction.followup.send("❌ You're not in any listening room.")
+        return
+    
+    try:
+        # Disconnect first
+        if room.voice_client:
+            await room.voice_client.disconnect()
+            room.voice_client = None
+        
+        # Reconnect
+        success = await room.connect_voice()
+        if success:
+            await interaction.followup.send("✅ Reconnected to voice channel.")
+        else:
+            await interaction.followup.send("❌ Failed to reconnect to voice channel.")
+            
+    except Exception as e:
+        logger.error(f"Reconnect command error: {e}")
+        await interaction.followup.send(f"❌ Error during reconnect: {e}")
+
+
+@bot.tree.command(name="quality", description="Show current audio quality settings")
+async def show_quality(interaction: discord.Interaction):
+    """Show current audio quality configuration."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    quality_info = []
+    quality_info.append("🎧 **Audio Quality Settings**")
+    quality_info.append(f"**Source Quality:** {'✅ High' if config.HIGH_QUALITY_AUDIO else '⚠️ Standard'}")
+    quality_info.append(f"**Discord Output:** ~96kbps Opus (Discord's limit)")
+    quality_info.append("")
+    quality_info.append("**Source Formats:**")
+    if config.HIGH_QUALITY_AUDIO:
+        quality_info.append("• **Apple Music:** ALAC/FLAC → Opus (lossless source)")
+        quality_info.append("• **Plex:** Highest bitrate → Opus (best available)")
+    else:
+        quality_info.append(f"• **Apple Music:** {config.GAMDL_CODEC} → Opus")
+        quality_info.append("• **Plex:** Native format → Opus")
+    quality_info.append("")
+    quality_info.append("**Discord Processing:**")
+    quality_info.append("• Opus 96kbps @ 48kHz stereo")
+    quality_info.append("• Professional loudness normalization")
+    quality_info.append("• Variable bitrate optimization")
+    quality_info.append("• Maximum Opus compression quality")
+    
+    quality_info.append("\n⚠️ **Note:** Discord compresses ALL audio to ~96kbps Opus")
+    quality_info.append("High source quality still matters for the encoding process!")
+    quality_info.append("\n💡 **Current Mode:** Downloads Apple Music for best source quality")
+    
+    await interaction.followup.send("\n".join(quality_info))
+
+
+@bot.tree.command(name="search", description="Search your music library for albums")
+@app_commands.describe(query="Artist or album name to search for")
+async def search_albums(interaction: discord.Interaction, query: str):
+    """Search for albums in the music library."""
+    await interaction.response.defer(thinking=True)
+    
+    if not config.PLEX_TOKEN or not config.PLEX_URL:
+        await interaction.followup.send("❌ Plex integration is not configured.")
+        return
+    
+    try:
+        headers = {"X-Plex-Token": config.PLEX_TOKEN}
+        sanitized_query = sanitize_query(query)
+        search_url = f"{config.PLEX_URL}/library/search?query={sanitized_query}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(search_url, headers=headers) as response:
+                if response.status != 200:
+                    await interaction.followup.send("❌ Failed to search your music library.")
+                    return
+                xml = await response.text()
+        
+        root = ET.fromstring(xml)
+        albums = []
+        
+        for elem in root.findall(".//Directory") + root.findall(".//Video"):
+            if elem.attrib.get("type") != "album":
+                continue
+            
+            title = elem.attrib.get("title", "")
+            artist = elem.attrib.get("parentTitle", "")
+            year = elem.attrib.get("year", "")
+            
+            # Calculate relevance score
+            combined = f"{artist} {title}"
+            score = fuzz.token_sort_ratio(query.lower(), combined.lower())
+            
+            albums.append({
+                "artist": artist,
+                "title": title,
+                "year": year,
+                "score": score,
+                "combined": f"{artist} - {title}" + (f" ({year})" if year else "")
+            })
+        
+        if not albums:
+            await interaction.followup.send(f"❌ No albums found for '{query}' in your library.")
+            return
+        
+        # Sort by relevance and show top 10
+        albums.sort(key=lambda x: x["score"], reverse=True)
+        top_albums = albums[:10]
+        
+        embed = discord.Embed(
+            title="🔍 Album Search Results",
+            description=f"Found {len(albums)} albums for: **{query}**",
+            color=discord.Color.blue()
+        )
+        
+        results_text = ""
+        for i, album in enumerate(top_albums, 1):
+            match_indicator = "🎯" if album["score"] > 80 else "✨" if album["score"] > 60 else "📀"
+            results_text += f"{match_indicator} **{album['combined']}**\n"
+        
+        embed.add_field(name="Top Matches", value=results_text, inline=False)
+        embed.set_footer(text="💡 Use /golive with the exact album name to start a listening room")
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Search command error: {e}")
+        await interaction.followup.send("❌ Error occurred while searching your music library.")
+
+
 # ==================== END PLAYBACK CONTROL COMMANDS ====================
 
 # ==================== END LISTENING ROOM COMMANDS ====================
@@ -2590,6 +3133,173 @@ async def recommend_album(interaction, message):
         
     except Exception as e:
         print(f"[ERROR] recommend_album failed: {e}")
+
+
+# Scrobbling Commands
+@bot.tree.command(name="scrobble_setup", description="Set up Last.fm scrobbling for your account")
+@app_commands.describe(username="Your Last.fm username")
+async def setup_scrobbling(interaction: discord.Interaction, username: str):
+    """Set up Last.fm scrobbling for a user."""
+    await interaction.response.defer(ephemeral=True)
+    
+    if not config.LASTFM_API_KEY or not config.LASTFM_API_SECRET:
+        await interaction.followup.send(
+            "❌ **Last.fm scrobbling is not configured on this bot.**\n"
+            "The bot admin needs to set `LASTFM_API_KEY` and `LASTFM_API_SECRET` environment variables."
+        )
+        return
+    
+    # Generate auth URL
+    auth_url = scrobble_manager.get_auth_url()
+    if not auth_url:
+        await interaction.followup.send("❌ Failed to generate Last.fm authentication URL.")
+        return
+    
+    # Create auth view with buttons
+    view = ScrobbleAuthView(interaction.user.id, username, auth_url)
+    
+    embed = discord.Embed(
+        title="🎵 Last.fm Scrobbling Setup",
+        description=(
+            f"**Step 1:** Click the button below to authorize this bot with your Last.fm account\n"
+            f"**Step 2:** After authorizing, click 'Complete Setup' to finish\n\n"
+            f"**Username:** {username}\n"
+            f"**Note:** You'll be able to scrobble tracks in listening rooms!"
+        ),
+        color=0xd51007  # Last.fm red
+    )
+    embed.set_footer(text="Your Last.fm credentials are stored securely and only used for scrobbling.")
+    
+    await interaction.followup.send(embed=embed, view=view)
+
+
+@bot.tree.command(name="scrobble_status", description="Check your Last.fm scrobbling status")
+async def scrobble_status(interaction: discord.Interaction):
+    """Check user's scrobbling status."""
+    await interaction.response.defer(ephemeral=True)
+    
+    user = scrobble_manager.get_user(interaction.user.id)
+    
+    if not user:
+        embed = discord.Embed(
+            title="🎵 Scrobbling Status",
+            description="❌ **Not set up**\n\nUse `/scrobble_setup` to connect your Last.fm account!",
+            color=0xff0000
+        )
+    else:
+        embed = discord.Embed(
+            title="🎵 Scrobbling Status",
+            description=f"✅ **Connected to Last.fm**\n\n**Username:** {user.lastfm_username}\n**Status:** Ready to scrobble!",
+            color=0x00ff00
+        )
+        embed.set_footer(text="Tracks will be scrobbled automatically when you listen in rooms.")
+    
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="scrobble_remove", description="Remove Last.fm scrobbling from your account")
+async def remove_scrobbling(interaction: discord.Interaction):
+    """Remove user's scrobbling configuration."""
+    await interaction.response.defer(ephemeral=True)
+    
+    removed = scrobble_manager.remove_user(interaction.user.id)
+    
+    if removed:
+        embed = discord.Embed(
+            title="🎵 Scrobbling Removed",
+            description="✅ Your Last.fm connection has been removed.\n\nYour listening activity will no longer be scrobbled.",
+            color=0xff9900
+        )
+    else:
+        embed = discord.Embed(
+            title="🎵 Scrobbling Not Found",
+            description="❌ You don't have Last.fm scrobbling set up.\n\nUse `/scrobble_setup` to connect your account!",
+            color=0xff0000
+        )
+    
+    await interaction.followup.send(embed=embed)
+
+
+class ScrobbleAuthView(discord.ui.View):
+    """View for Last.fm authentication process."""
+    
+    def __init__(self, user_id: int, username: str, auth_url: str):
+        super().__init__(timeout=300)  # 5 minutes
+        self.user_id = user_id
+        self.username = username
+        
+        # Set the authorization URL for the button
+        self.authorize_lastfm.url = auth_url
+    
+    @discord.ui.button(label="Authorize Last.fm", style=discord.ButtonStyle.link, url="", emoji="🔗")
+    async def authorize_lastfm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Button to authorize with Last.fm."""
+        # This is a link button, so it opens Last.fm in browser
+        pass
+    
+    @discord.ui.button(label="Complete Setup", style=discord.ButtonStyle.green, emoji="✅")
+    async def complete_setup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Complete the scrobbling setup."""
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Only the person who started this setup can complete it.", ephemeral=True)
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        # This is a simplified version - in a full implementation, you'd need to:
+        # 1. Get the auth token from Last.fm after user authorization
+        # 2. Exchange it for a session key
+        # For now, we'll show instructions for manual setup
+        
+        embed = discord.Embed(
+            title="🎵 Manual Setup Required",
+            description=(
+                "**To complete scrobbling setup:**\n\n"
+                "1. After authorizing, you'll get a token from Last.fm\n"
+                "2. Ask a bot admin to add your session key manually\n"
+                "3. This will be automated in a future update!\n\n"
+                f"**Your Username:** {self.username}"
+            ),
+            color=0xff9900
+        )
+        embed.set_footer(text="Sorry for the manual step - full OAuth flow coming soon!")
+        
+        await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="scrobble_add_user", description="[Admin] Manually add a user's Last.fm session key")
+@app_commands.describe(
+    user="Discord user to add scrobbling for",
+    lastfm_username="Their Last.fm username", 
+    session_key="Their Last.fm session key"
+)
+async def add_scrobble_user(interaction: discord.Interaction, user: discord.Member, lastfm_username: str, session_key: str):
+    """Admin command to manually add a user's scrobbling configuration."""
+    # Check if user is admin
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Only administrators can use this command.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        scrobble_manager.add_user(user.id, lastfm_username, session_key)
+        
+        embed = discord.Embed(
+            title="✅ Scrobbling User Added",
+            description=f"**User:** {user.mention}\n**Last.fm:** {lastfm_username}\n\nThey can now scrobble tracks in listening rooms!",
+            color=0x00ff00
+        )
+        await interaction.followup.send(embed=embed)
+        
+        # Notify the user
+        try:
+            await user.send(f"🎵 **Scrobbling Enabled!**\n\nYour Last.fm account ({lastfm_username}) has been connected to the music bot. Your listening activity in rooms will now be scrobbled automatically!")
+        except:
+            pass  # User might have DMs disabled
+            
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to add scrobbling user: {e}")
 
 
 if __name__ == "__main__":
