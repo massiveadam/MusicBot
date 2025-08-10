@@ -277,7 +277,7 @@ class ListeningRoom:
             return False
     
     async def connect_voice(self) -> bool:
-        """Connect to the voice channel with improved error handling."""
+        """Connect to the voice channel with conservative, robust error handling."""
         if not self.voice_channel:
             logger.error("No voice channel to connect to")
             return False
@@ -290,61 +290,38 @@ class ListeningRoom:
                 
             logger.info(f"Connecting to voice channel: {self.voice_channel.name}")
             
-            # Try connection with optimized retry logic
-            max_retries = 3  # Reduced retries to minimize connection cycles
-            base_delay = 2   # Reduced base delay
-            
-            for attempt in range(max_retries):
-                try:
-                    # Connect with optimized settings
-                    self.voice_client = await self.voice_channel.connect(
-                        reconnect=False,  # Disable auto-reconnect to prevent cycles
-                        timeout=30.0,     # Reduced timeout
-                        cls=discord.voice_client.VoiceClient
-                    )
+            # Conservative connection approach - single attempt with longer timeout
+            try:
+                # Connect with conservative settings to avoid Discord rate limits
+                self.voice_client = await self.voice_channel.connect(
+                    reconnect=False,  # Disable auto-reconnect to prevent cycles
+                    timeout=60.0,     # Longer timeout for stability
+                    cls=discord.voice_client.VoiceClient
+                )
+                
+                # Wait longer for the connection to fully stabilize
+                await asyncio.sleep(2.0)
+                
+                if self.voice_client and self.voice_client.is_connected():
+                    logger.info(f"Successfully connected to voice channel in room {self.room_id}")
+                    return True
+                else:
+                    logger.error("Voice client not connected after connection attempt")
+                    return False
                     
-                    # Wait a moment for the connection to stabilize
-                    await asyncio.sleep(0.5)
-                    
-                    if self.voice_client and self.voice_client.is_connected():
-                        logger.info(f"Successfully connected to voice channel in room {self.room_id}")
-                        return True
-                    else:
-                        logger.warning(f"Voice client not connected after attempt {attempt + 1}")
-                        if attempt < max_retries - 1:
-                            delay = base_delay * (attempt + 1)  # Exponential backoff
-                            logger.info(f"Retrying in {delay} seconds...")
-                            await asyncio.sleep(delay)
-                            continue
-                        else:
-                            logger.error("Voice client not connected after all connection attempts")
-                            return False
-                            
-                except discord.errors.ConnectionClosed as e:
-                    if attempt < max_retries - 1:
-                        delay = base_delay * (attempt + 1)  # Exponential backoff
-                        logger.warning(f"Discord connection error {e.code} (attempt {attempt + 1}/{max_retries}), retrying in {delay} seconds...")
-                        await asyncio.sleep(delay)
-                        continue
-                    else:
-                        logger.error(f"Failed to connect after {max_retries} attempts: {e}")
-                        return False
-                except discord.errors.ClientException as e:
-                    if "Already connected to a voice channel" in str(e):
-                        logger.info("Already connected to voice channel")
-                        return True
-                    else:
-                        logger.error(f"Discord client exception: {e}")
-                        return False
-                except Exception as e:
-                    logger.error(f"Unexpected error during voice connection: {type(e).__name__}: {e}")
-                    if attempt < max_retries - 1:
-                        delay = base_delay * (attempt + 1)
-                        logger.info(f"Retrying in {delay} seconds...")
-                        await asyncio.sleep(delay)
-                        continue
-                    else:
-                        return False
+            except discord.errors.ConnectionClosed as e:
+                logger.error(f"Discord connection closed with code {e.code}: {e}")
+                return False
+            except discord.errors.ClientException as e:
+                if "Already connected to a voice channel" in str(e):
+                    logger.info("Already connected to voice channel")
+                    return True
+                else:
+                    logger.error(f"Discord client exception: {e}")
+                    return False
+            except Exception as e:
+                logger.error(f"Unexpected error during voice connection: {type(e).__name__}: {e}")
+                return False
                     
         except Exception as e:
             logger.error(f"Failed to connect to voice channel: {type(e).__name__}: {e}")
@@ -367,20 +344,8 @@ class ListeningRoom:
             return False
             
         if not self.voice_client.is_connected():
-            logger.warning("Voice client not connected, attempting reconnect...")
-            # Try to reconnect with more robust logic
-            reconnect_attempts = 3
-            for attempt in range(reconnect_attempts):
-                if await self.connect_voice():
-                    logger.info("Successfully reconnected to voice channel")
-                    break
-                else:
-                    if attempt < reconnect_attempts - 1:
-                        logger.warning(f"Reconnection attempt {attempt + 1} failed, retrying in 3 seconds...")
-                        await asyncio.sleep(3)
-                    else:
-                        logger.error("Failed to reconnect to voice channel after all attempts")
-                        return False
+            logger.error("Voice client not connected, cannot play audio")
+            return False
             
         try:
             track = self.current_track_info
@@ -395,28 +360,18 @@ class ListeningRoom:
             # Set start time for tracking playback duration
             self.start_time = time.time()
             
-            # Create FFmpeg audio source with minimal options for direct streaming
-            # Using only essential options to minimize conversion and delays
+            # Create FFmpeg audio source with absolute minimal options
+            # Using only the most basic options to avoid any processing issues
             ffmpeg_options = {
-                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                'options': '-vn -acodec copy'
+                'before_options': '-reconnect 1',
+                'options': '-vn'
             }
             
             if track.file_path.startswith("http"):
-                # Streaming URL (Plex) - try to stream directly without transcoding
+                # Streaming URL (Plex) - use minimal options
                 logger.info(f"Playing streaming URL: {track.file_path[:50]}...")
-                try:
-                    source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
-                    logger.info(f"Successfully created FFmpeg source for streaming URL")
-                except Exception as e:
-                    logger.error(f"Failed to create FFmpeg source with copy codec: {e}")
-                    # Fallback to minimal transcoding if copy fails
-                    fallback_options = {
-                        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                        'options': '-vn -acodec libopus -b:a 96k'
-                    }
-                    source = discord.FFmpegPCMAudio(track.file_path, **fallback_options)
-                    logger.info(f"Using fallback FFmpeg options for streaming")
+                source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
+                logger.info(f"Successfully created FFmpeg source for streaming URL")
             else:
                 # Local file
                 logger.info(f"Playing local file: {track.file_path}")
@@ -3383,19 +3338,19 @@ async def show_quality(interaction: discord.Interaction):
     
     quality_info.append("\n**Plex Streaming Improvements:**")
     quality_info.append("• ✅ Direct audio streaming (no transcoding)")
-    quality_info.append("• ✅ Optimized reconnect settings")
-    quality_info.append("• ✅ Improved process cleanup")
-    quality_info.append("• ✅ Fallback to minimal transcoding if needed")
+    quality_info.append("• ✅ Ultra-minimal FFmpeg options (-vn only)")
+    quality_info.append("• ✅ Conservative single-connection approach")
+    quality_info.append("• ✅ Eliminated retry loops to prevent 4006 errors")
     
     quality_info.append("\n**Recent Connection Improvements:**")
-    quality_info.append("• ✅ Reduced connection retries to minimize cycles")
-    quality_info.append("• ✅ Disabled auto-reconnect to prevent loops")
-    quality_info.append("• ✅ Optimized timeout and delay settings")
-    quality_info.append("• ✅ Enhanced player button reliability")
+    quality_info.append("• ✅ Single connection attempt with longer timeout")
+    quality_info.append("• ✅ Disabled auto-reconnect to prevent cycles")
+    quality_info.append("• ✅ Longer connection stabilization time")
+    quality_info.append("• ✅ Removed reconnection attempts during playback")
     
     quality_info.append("\n⚠️ **Note:** Discord has a hard 96kbps limit")
     quality_info.append("We've optimized for the best possible quality within this limit!")
-    quality_info.append("\n💡 **Current Mode:** Direct streaming with minimal conversion")
+    quality_info.append("\n💡 **Current Mode:** Ultra-minimal streaming with no conversion")
     
     await interaction.followup.send("\n".join(quality_info))
 
