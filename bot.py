@@ -277,7 +277,7 @@ class ListeningRoom:
             return False
     
     async def connect_voice(self) -> bool:
-        """Connect to the voice channel with conservative, robust error handling."""
+        """Connect to the voice channel with enhanced error handling and retry logic."""
         if not self.voice_channel:
             logger.error("No voice channel to connect to")
             return False
@@ -290,38 +290,70 @@ class ListeningRoom:
                 
             logger.info(f"Connecting to voice channel: {self.voice_channel.name}")
             
-            # Conservative connection approach - single attempt with longer timeout
-            try:
-                # Connect with conservative settings to avoid Discord rate limits
-                self.voice_client = await self.voice_channel.connect(
-                    reconnect=False,  # Disable auto-reconnect to prevent cycles
-                    timeout=60.0,     # Longer timeout for stability
-                    cls=discord.voice_client.VoiceClient
-                )
-                
-                # Wait longer for the connection to fully stabilize
-                await asyncio.sleep(2.0)
-                
-                if self.voice_client and self.voice_client.is_connected():
-                    logger.info(f"Successfully connected to voice channel in room {self.room_id}")
-                    return True
-                else:
-                    logger.error("Voice client not connected after connection attempt")
-                    return False
+            # Enhanced connection approach with multiple strategies
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    logger.info(f"Connection attempt {attempt + 1}/{max_attempts}")
                     
-            except discord.errors.ConnectionClosed as e:
-                logger.error(f"Discord connection closed with code {e.code}: {e}")
-                return False
-            except discord.errors.ClientException as e:
-                if "Already connected to a voice channel" in str(e):
-                    logger.info("Already connected to voice channel")
-                    return True
-                else:
-                    logger.error(f"Discord client exception: {e}")
-                    return False
-            except Exception as e:
-                logger.error(f"Unexpected error during voice connection: {type(e).__name__}: {e}")
-                return False
+                    # Strategy 1: Try with minimal settings first
+                    if attempt == 0:
+                        self.voice_client = await self.voice_channel.connect(
+                            reconnect=False,
+                            timeout=30.0,
+                            cls=discord.voice_client.VoiceClient
+                        )
+                    # Strategy 2: Try with different timeout
+                    elif attempt == 1:
+                        self.voice_client = await self.voice_channel.connect(
+                            reconnect=False,
+                            timeout=45.0,
+                            cls=discord.voice_client.VoiceClient
+                        )
+                    # Strategy 3: Try with auto-reconnect enabled
+                    else:
+                        self.voice_client = await self.voice_channel.connect(
+                            reconnect=True,
+                            timeout=60.0,
+                            cls=discord.voice_client.VoiceClient
+                        )
+                    
+                    # Wait for connection to stabilize
+                    await asyncio.sleep(3.0)
+                    
+                    if self.voice_client and self.voice_client.is_connected():
+                        logger.info(f"Successfully connected to voice channel in room {self.room_id} on attempt {attempt + 1}")
+                        return True
+                    else:
+                        logger.warning(f"Voice client not connected after attempt {attempt + 1}")
+                        if self.voice_client:
+                            await self.voice_client.disconnect()
+                            self.voice_client = None
+                        
+                except discord.errors.ConnectionClosed as e:
+                    logger.error(f"Discord connection closed with code {e.code} on attempt {attempt + 1}: {e}")
+                    if attempt < max_attempts - 1:
+                        wait_time = (attempt + 1) * 5  # Progressive backoff: 5s, 10s, 15s
+                        logger.info(f"Waiting {wait_time} seconds before retry...")
+                        await asyncio.sleep(wait_time)
+                    continue
+                except discord.errors.ClientException as e:
+                    if "Already connected to a voice channel" in str(e):
+                        logger.info("Already connected to voice channel")
+                        return True
+                    else:
+                        logger.error(f"Discord client exception on attempt {attempt + 1}: {e}")
+                        if attempt < max_attempts - 1:
+                            await asyncio.sleep(5)
+                        continue
+                except Exception as e:
+                    logger.error(f"Unexpected error during voice connection attempt {attempt + 1}: {type(e).__name__}: {e}")
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(5)
+                    continue
+            
+            logger.error(f"Failed to connect after {max_attempts} attempts")
+            return False
                     
         except Exception as e:
             logger.error(f"Failed to connect to voice channel: {type(e).__name__}: {e}")
@@ -334,7 +366,7 @@ class ListeningRoom:
             self.voice_client = None
     
     async def play_current_track(self) -> bool:
-        """Start playing the current track."""
+        """Start playing the current track with enhanced error handling."""
         if not self.current_track_info:
             logger.error("No current track to play")
             return False
@@ -351,19 +383,27 @@ class ListeningRoom:
             track = self.current_track_info
             logger.info(f"Attempting to play track: {track} (file: {track.file_path})")
             
-            # Stop any currently playing audio and ensure cleanup
+            # Ensure any currently playing audio is fully stopped
             if self.voice_client.is_playing():
+                logger.info("Stopping currently playing audio...")
                 self.voice_client.stop()
-                # Wait for the current process to terminate
-                await asyncio.sleep(1.0)
+                # Wait longer for FFmpeg process to terminate
+                await asyncio.sleep(2.0)
+                
+                # Double-check if still playing
+                if self.voice_client.is_playing():
+                    logger.warning("Audio still playing after stop, forcing disconnect...")
+                    await self.voice_client.disconnect()
+                    await asyncio.sleep(1.0)
+                    # Reconnect
+                    await self.connect_voice()
             
             # Set start time for tracking playback duration
             self.start_time = time.time()
             
-            # Create FFmpeg audio source with absolute minimal options
-            # Using only the most basic options to avoid any processing issues
+            # Create FFmpeg audio source with minimal options
             ffmpeg_options = {
-                'before_options': '-reconnect 1',
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
                 'options': '-vn'
             }
             
@@ -394,12 +434,38 @@ class ListeningRoom:
             # Update now playing for all scrobbling users
             await scrobble_manager.update_now_playing_for_room(self, track)
             
+            # Update the UI to reflect the new track
+            await self._update_ui()
+            
             logger.info(f"Successfully started playing {track} in room {self.room_id}")
             return True
             
         except Exception as e:
             logger.error(f"Failed to play track: {type(e).__name__}: {e}")
             return False
+    
+    async def _update_ui(self):
+        """Update the UI with current track information."""
+        try:
+            # Find the original message with the now playing embed
+            if hasattr(self, 'now_playing_message') and self.now_playing_message:
+                try:
+                    # Update the embed
+                    updated_embed = await create_now_playing_embed(self)
+                    
+                    # Update the view
+                    playback_controls = PlaybackControlView(self.room_id)
+                    await playback_controls.update_buttons(self)
+                    
+                    # Edit the message
+                    await self.now_playing_message.edit(
+                        embed=updated_embed,
+                        view=playback_controls
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to update UI: {e}")
+        except Exception as e:
+            logger.error(f"Error in _update_ui: {e}")
     
     async def pause(self):
         """Pause playback."""
@@ -408,6 +474,7 @@ class ListeningRoom:
             self.is_paused = True
             self.pause_time = time.time()
             logger.info(f"Paused playback in room {self.room_id}")
+            await self._update_ui()
     
     async def resume(self):
         """Resume playback."""
@@ -420,34 +487,89 @@ class ListeningRoom:
                 self.start_time += pause_duration
             self.pause_time = None
             logger.info(f"Resumed playback in room {self.room_id}")
+            await self._update_ui()
     
     async def stop(self):
-        """Stop playback."""
+        """Stop playback with enhanced FFmpeg process management."""
         if self.voice_client:
+            logger.info(f"Stopping playback in room {self.room_id}")
+            
+            # Stop the audio
             self.voice_client.stop()
             self.is_playing = False
             self.is_paused = False
             self.pause_time = None
-            # Wait a moment for the process to terminate
-            await asyncio.sleep(0.5)
+            
+            # Wait for FFmpeg process to terminate
+            await asyncio.sleep(2.0)
+            
+            # Force disconnect and reconnect if process is still running
+            if hasattr(self.voice_client, '_player') and self.voice_client._player:
+                try:
+                    # Check if FFmpeg process is still running
+                    if hasattr(self.voice_client._player, '_process') and self.voice_client._player._process:
+                        if self.voice_client._player._process.poll() is None:
+                            logger.warning("FFmpeg process still running, forcing termination...")
+                            self.voice_client._player._process.terminate()
+                            await asyncio.sleep(1.0)
+                            if self.voice_client._player._process.poll() is None:
+                                self.voice_client._player._process.kill()
+                except Exception as e:
+                    logger.error(f"Error managing FFmpeg process: {e}")
+            
             logger.info(f"Stopped playback in room {self.room_id}")
+            await self._update_ui()
     
     async def skip_to_next(self) -> bool:
-        """Skip to the next track."""
+        """Skip to the next track with enhanced error handling."""
         if self.current_track < len(self.tracks) - 1:
             logger.info(f"Skipping to next track in room {self.room_id}")
+            
+            # Stop current playback
             await self.stop()
+            
+            # Wait a moment for cleanup
+            await asyncio.sleep(0.5)
+            
+            # Move to next track
             self.current_track += 1
-            return await self.play_current_track()
+            
+            # Start playing the new track
+            success = await self.play_current_track()
+            
+            if success:
+                # Announce the track change
+                if self.text_channel:
+                    track = self.current_track_info
+                    await self.text_channel.send(f"⏭️ Skipped to next track: **{track}**", silent=True)
+            
+            return success
         return False
     
     async def skip_to_previous(self) -> bool:
-        """Skip to the previous track."""
+        """Skip to the previous track with enhanced error handling."""
         if self.current_track > 0:
             logger.info(f"Skipping to previous track in room {self.room_id}")
+            
+            # Stop current playback
             await self.stop()
+            
+            # Wait a moment for cleanup
+            await asyncio.sleep(0.5)
+            
+            # Move to previous track
             self.current_track -= 1
-            return await self.play_current_track()
+            
+            # Start playing the new track
+            success = await self.play_current_track()
+            
+            if success:
+                # Announce the track change
+                if self.text_channel:
+                    track = self.current_track_info
+                    await self.text_channel.send(f"⏮️ Skipped to previous track: **{track}**", silent=True)
+            
+            return success
         return False
     
     async def _track_finished(self, error):
@@ -473,6 +595,8 @@ class ListeningRoom:
             self.is_playing = False
             if self.text_channel:
                 await self.text_channel.send("🎵 **Album finished!** Thanks for listening together! 🎉")
+                # Update the UI to show stopped state
+                await self._update_ui()
     
     async def cleanup(self):
         """Clean up room resources."""
@@ -877,6 +1001,8 @@ class PlaybackControlView(discord.ui.View):
             return
         
         try:
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            
             if room.is_playing and not room.is_paused:
                 # Pause
                 await room.pause()
@@ -892,8 +1018,12 @@ class PlaybackControlView(discord.ui.View):
                     action = "started"
                 emoji = "▶️"
             
+            # Update the UI
             await self.update_buttons(room)
-            await interaction.response.edit_message(view=self)
+            await interaction.followup.edit_message(
+                message_id=interaction.message.id,
+                view=self
+            )
             
             # Announce the action
             if room.text_channel:
@@ -901,7 +1031,7 @@ class PlaybackControlView(discord.ui.View):
                 
         except Exception as e:
             logger.error(f"Play/pause error: {e}")
-            await interaction.response.send_message("❌ Failed to control playback.", ephemeral=True)
+            await interaction.followup.send("❌ Failed to control playback.", ephemeral=True)
     
     @discord.ui.button(label="⏮️ Previous", style=discord.ButtonStyle.secondary, custom_id="previous")
     async def previous_track(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -919,9 +1049,14 @@ class PlaybackControlView(discord.ui.View):
             return
         
         try:
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            
             success = await room.skip_to_previous()
             await self.update_buttons(room)
-            await interaction.response.edit_message(view=self)
+            await interaction.followup.edit_message(
+                message_id=interaction.message.id,
+                view=self
+            )
             
             if success and room.text_channel:
                 track = room.current_track_info
@@ -929,7 +1064,7 @@ class PlaybackControlView(discord.ui.View):
             
         except Exception as e:
             logger.error(f"Previous track error: {e}")
-            await interaction.response.send_message("❌ Failed to skip to previous track.", ephemeral=True)
+            await interaction.followup.send("❌ Failed to skip to previous track.", ephemeral=True)
     
     @discord.ui.button(label="⏭️ Next", style=discord.ButtonStyle.secondary, custom_id="next")
     async def next_track(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -947,9 +1082,14 @@ class PlaybackControlView(discord.ui.View):
             return
         
         try:
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            
             success = await room.skip_to_next()
             await self.update_buttons(room)
-            await interaction.response.edit_message(view=self)
+            await interaction.followup.edit_message(
+                message_id=interaction.message.id,
+                view=self
+            )
             
             if success and room.text_channel:
                 track = room.current_track_info
@@ -957,7 +1097,7 @@ class PlaybackControlView(discord.ui.View):
             
         except Exception as e:
             logger.error(f"Next track error: {e}")
-            await interaction.response.send_message("❌ Failed to skip to next track.", ephemeral=True)
+            await interaction.followup.send("❌ Failed to skip to next track.", ephemeral=True)
     
     @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id="stop")
     async def stop_playback(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -971,16 +1111,21 @@ class PlaybackControlView(discord.ui.View):
             return
         
         try:
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            
             await room.stop()
             await self.update_buttons(room)
-            await interaction.response.edit_message(view=self)
+            await interaction.followup.edit_message(
+                message_id=interaction.message.id,
+                view=self
+            )
             
             if room.text_channel:
                 await room.text_channel.send(f"⏹️ **{interaction.user.display_name}** stopped the music", silent=True)
             
         except Exception as e:
             logger.error(f"Stop playback error: {e}")
-            await interaction.response.send_message("❌ Failed to stop playback.", ephemeral=True)
+            await interaction.followup.send("❌ Failed to stop playback.", ephemeral=True)
 
 async def create_now_playing_embed(room: ListeningRoom) -> discord.Embed:
     """Create a 'Now Playing' embed for the room."""
@@ -2837,6 +2982,9 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             view=playback_controls
         )
         
+        # Store the message reference for UI updates
+        room.now_playing_message = loading_msg
+        
         # Auto-start playback with retries
         await asyncio.sleep(2)  # Give more time for voice connection to stabilize
         
@@ -3337,16 +3485,16 @@ async def show_quality(interaction: discord.Interaction):
     quality_info.append("• Optimized for real-time music streaming")
     
     quality_info.append("\n**Plex Streaming Improvements:**")
-    quality_info.append("• ✅ Direct audio streaming (no transcoding)")
-    quality_info.append("• ✅ Ultra-minimal FFmpeg options (-vn only)")
-    quality_info.append("• ✅ Conservative single-connection approach")
-    quality_info.append("• ✅ Eliminated retry loops to prevent 4006 errors")
+    quality_info.append("• ✅ Enhanced multi-strategy voice connection")
+    quality_info.append("• ✅ Progressive backoff retry logic (5s, 10s, 15s)")
+    quality_info.append("• ✅ Improved FFmpeg process management")
+    quality_info.append("• ✅ Real-time UI updates for track changes")
     
     quality_info.append("\n**Recent Connection Improvements:**")
-    quality_info.append("• ✅ Single connection attempt with longer timeout")
-    quality_info.append("• ✅ Disabled auto-reconnect to prevent cycles")
-    quality_info.append("• ✅ Longer connection stabilization time")
-    quality_info.append("• ✅ Removed reconnection attempts during playback")
+    quality_info.append("• ✅ Multiple connection strategies (minimal, timeout, auto-reconnect)")
+    quality_info.append("• ✅ Enhanced FFmpeg process termination handling")
+    quality_info.append("• ✅ Fixed player button functionality")
+    quality_info.append("• ✅ Automatic track info updates in UI")
     
     quality_info.append("\n⚠️ **Note:** Discord has a hard 96kbps limit")
     quality_info.append("We've optimized for the best possible quality within this limit!")
