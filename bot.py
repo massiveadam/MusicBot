@@ -290,35 +290,61 @@ class ListeningRoom:
                 
             logger.info(f"Connecting to voice channel: {self.voice_channel.name}")
             
-            # Try connection with retry logic for Discord error 4006
-            max_retries = 3
+            # Try connection with more robust retry logic
+            max_retries = 5
+            base_delay = 3
+            
             for attempt in range(max_retries):
                 try:
-                    # Connect with high quality settings
+                    # Connect with high quality settings and longer timeout
                     self.voice_client = await self.voice_channel.connect(
                         reconnect=True, 
-                        timeout=30.0,
-                        cls=discord.voice_client.VoiceClient  # Use default high-quality voice client
+                        timeout=45.0,  # Increased timeout
+                        cls=discord.voice_client.VoiceClient
                     )
+                    
+                    # Wait a moment for the connection to stabilize
+                    await asyncio.sleep(1)
                     
                     if self.voice_client and self.voice_client.is_connected():
                         logger.info(f"Successfully connected to voice channel in room {self.room_id}")
                         return True
                     else:
-                        logger.error("Voice client not connected after connection attempt")
-                        return False
+                        logger.warning(f"Voice client not connected after attempt {attempt + 1}")
+                        if attempt < max_retries - 1:
+                            delay = base_delay * (attempt + 1)  # Exponential backoff
+                            logger.info(f"Retrying in {delay} seconds...")
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            logger.error("Voice client not connected after all connection attempts")
+                            return False
                         
                 except discord.errors.ConnectionClosed as e:
-                    if e.code == 4006 and attempt < max_retries - 1:
-                        logger.warning(f"Discord connection error 4006 (attempt {attempt + 1}/{max_retries}), retrying in 2 seconds...")
-                        await asyncio.sleep(2)
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (attempt + 1)  # Exponential backoff
+                        logger.warning(f"Discord connection error {e.code} (attempt {attempt + 1}/{max_retries}), retrying in {delay} seconds...")
+                        await asyncio.sleep(delay)
                         continue
                     else:
                         logger.error(f"Failed to connect after {max_retries} attempts: {e}")
                         return False
+                except discord.errors.ClientException as e:
+                    if "Already connected to a voice channel" in str(e):
+                        logger.info("Already connected to voice channel")
+                        return True
+                    else:
+                        logger.error(f"Discord client exception: {e}")
+                        return False
                 except Exception as e:
                     logger.error(f"Unexpected error during voice connection: {type(e).__name__}: {e}")
-                    return False
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (attempt + 1)
+                        logger.info(f"Retrying in {delay} seconds...")
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        return False
                     
         except Exception as e:
             logger.error(f"Failed to connect to voice channel: {type(e).__name__}: {e}")
@@ -341,10 +367,20 @@ class ListeningRoom:
             return False
             
         if not self.voice_client.is_connected():
-            logger.error("Voice client not connected, attempting reconnect...")
-            if not await self.connect_voice():
-                logger.error("Failed to reconnect to voice channel")
-                return False
+            logger.warning("Voice client not connected, attempting reconnect...")
+            # Try to reconnect with more robust logic
+            reconnect_attempts = 3
+            for attempt in range(reconnect_attempts):
+                if await self.connect_voice():
+                    logger.info("Successfully reconnected to voice channel")
+                    break
+                else:
+                    if attempt < reconnect_attempts - 1:
+                        logger.warning(f"Reconnection attempt {attempt + 1} failed, retrying in 3 seconds...")
+                        await asyncio.sleep(3)
+                    else:
+                        logger.error("Failed to reconnect to voice channel after all attempts")
+                        return False
             
         try:
             track = self.current_track_info
@@ -3135,11 +3171,26 @@ async def debug_voice(interaction: discord.Interaction):
         debug_info.append(f"**Is Playing:** {'✅' if room.voice_client.is_playing() else '❌'}")
         debug_info.append(f"**Is Paused:** {'✅' if room.voice_client.is_paused() else '❌'}")
         debug_info.append(f"**Latency:** {room.voice_client.latency * 1000:.1f}ms")
+        
+        # Additional connection diagnostics
+        if hasattr(room.voice_client, 'ws') and room.voice_client.ws:
+            debug_info.append(f"**WebSocket Open:** {'✅' if not room.voice_client.ws.closed else '❌'}")
+            if hasattr(room.voice_client.ws, 'latency'):
+                debug_info.append(f"**WS Latency:** {room.voice_client.ws.latency * 1000:.1f}ms")
+        
+        # Voice channel info
+        if room.voice_channel:
+            debug_info.append(f"**Channel Members:** {len(room.voice_channel.members)}")
+            debug_info.append(f"**Channel ID:** {room.voice_channel.id}")
     
     debug_info.append(f"**Room State - Playing:** {room.is_playing}")
     debug_info.append(f"**Room State - Paused:** {room.is_paused}")
     debug_info.append(f"**Current Track:** {room.current_track_info or 'None'}")
     debug_info.append(f"**Total Tracks:** {len(room.tracks)}")
+    
+    # Connection history (if available)
+    if hasattr(room, '_connection_attempts'):
+        debug_info.append(f"**Connection Attempts:** {getattr(room, '_connection_attempts', 0)}")
     
     await interaction.followup.send("\n".join(debug_info))
 
