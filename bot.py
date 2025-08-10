@@ -2642,7 +2642,6 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     add_reactions=True,  # Can react to messages
                     # Mute notifications for everyone by default
                     mention_everyone=False,  # Cannot mention @everyone
-                    mention_roles=False,  # Cannot mention roles
                 ),
                 interaction.user: discord.PermissionOverwrite(
                     # Room creator gets full permissions including notifications
@@ -2654,7 +2653,6 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     send_messages=True,
                     add_reactions=True,
                     mention_everyone=True,  # Can mention @everyone
-                    mention_roles=True,  # Can mention roles
                 ),
                 interaction.guild.me: discord.PermissionOverwrite(
                     # Bot needs full permissions
@@ -2665,7 +2663,6 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     send_messages=True,
                     read_message_history=True,
                     mention_everyone=True,
-                    mention_roles=True,
                 )
             }
             
@@ -2677,7 +2674,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             
         except Exception as e:
             logger.error(f"Failed to create category: {e}")
-            room_manager.cleanup_room(room.room_id)
+            await room_manager.cleanup_room(room.room_id)
             await interaction.followup.send("❌ Failed to create listening room category.")
             return
         
@@ -2741,7 +2738,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     await room.category.delete(reason="Channel creation failed")
                 except:
                     pass
-            room_manager.cleanup_room(room.room_id)
+            await room_manager.cleanup_room(room.room_id)
             await interaction.followup.send("❌ Failed to create voice/text channels.")
             return
         
@@ -2910,7 +2907,7 @@ async def join_room_command(interaction: discord.Interaction, room_id: str):
     
     # Announce in the text channel
     if room.text_channel:
-        await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})")
+        await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})", silent=True)
 
 
 @bot.tree.command(name="leave", description="Leave your current listening room")
