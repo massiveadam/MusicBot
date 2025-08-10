@@ -372,7 +372,6 @@ class ListeningRoom:
                     '-frame_duration 20 '  # 20ms frame duration for low latency
                     '-compression_level 10 '  # Maximum Opus compression quality
                     '-vbr on '  # Variable bitrate for better quality
-                    '-vbr_constraint on '  # Constrained VBR for consistent quality
                     '-packet_loss 0 '  # Optimize for lossless transmission
                     '-filter:a "volume=0.9,highpass=f=10,lowpass=f=20000" '  # Volume + frequency optimization
                 )
@@ -404,8 +403,8 @@ class ListeningRoom:
                     logger.error(f"Audio playback error: {error}")
                 else:
                     logger.info(f"Track finished: {track}")
-                # Schedule the track finished handler
-                asyncio.create_task(self._track_finished(error))
+                # Schedule the track finished handler on the bot's event loop
+                bot.loop.call_soon_threadsafe(lambda: asyncio.create_task(self._track_finished(error)))
             
             self.voice_client.play(source, after=after_playing)
             self.is_playing = True
@@ -2646,11 +2645,11 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         category = None  # You can set a specific category if you want
         
         try:
-            # Set up permissions for listening room - everyone can speak by default
+            # Set up permissions for listening room - default mics muted for focused listening
             overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(
-                    speak=True,  # Allow everyone to speak by default
-                    use_voice_activation=True  # Enable voice activation
+                    speak=False,  # Mute mics by default
+                    use_voice_activation=False  # Disable voice activation
                 ),
                 interaction.guild.me: discord.PermissionOverwrite(
                     speak=True,  # Bot can speak (for music)
@@ -2683,7 +2682,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         # Create room announcement embed
         embed = discord.Embed(
             title=f"🎵 Listening Room Created",
-            description=f"**{artist} - {album}**\n\nRoom ID: `{room.room_id}`\n\nAnyone can join and control the music!\n🎤 *Everyone can speak by default*",
+            description=f"**{artist} - {album}**\n\nRoom ID: `{room.room_id}`\n\nAnyone can join and control the music!\n🔇 *Mics muted by default for focused listening*",
             color=discord.Color.purple()
         )
         embed.add_field(
