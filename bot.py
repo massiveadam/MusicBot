@@ -277,7 +277,7 @@ class ListeningRoom:
             return False
     
     async def connect_voice(self) -> bool:
-        """Connect to the voice channel with enhanced error handling and retry logic."""
+        """Connect to the voice channel with simplified, reliable approach."""
         if not self.voice_channel:
             logger.error("No voice channel to connect to")
             return False
@@ -290,71 +290,41 @@ class ListeningRoom:
                 
             logger.info(f"Connecting to voice channel: {self.voice_channel.name}")
             
-            # Enhanced connection approach with multiple strategies
-            max_attempts = 3
-            for attempt in range(max_attempts):
-                try:
-                    logger.info(f"Connection attempt {attempt + 1}/{max_attempts}")
-                    
-                    # Strategy 1: Try with minimal settings first
-                    if attempt == 0:
-                        self.voice_client = await self.voice_channel.connect(
-                            reconnect=False,
-                            timeout=30.0,
-                            cls=discord.voice_client.VoiceClient
-                        )
-                    # Strategy 2: Try with different timeout
-                    elif attempt == 1:
-                        self.voice_client = await self.voice_channel.connect(
-                            reconnect=False,
-                            timeout=45.0,
-                            cls=discord.voice_client.VoiceClient
-                        )
-                    # Strategy 3: Try with auto-reconnect enabled
-                    else:
-                        self.voice_client = await self.voice_channel.connect(
-                            reconnect=True,
-                            timeout=60.0,
-                            cls=discord.voice_client.VoiceClient
-                        )
-                    
-                    # Wait for connection to stabilize
-                    await asyncio.sleep(3.0)
-                    
-                    if self.voice_client and self.voice_client.is_connected():
-                        logger.info(f"Successfully connected to voice channel in room {self.room_id} on attempt {attempt + 1}")
-                        return True
-                    else:
-                        logger.warning(f"Voice client not connected after attempt {attempt + 1}")
-                        if self.voice_client:
-                            await self.voice_client.disconnect()
-                            self.voice_client = None
+            # Single, reliable connection attempt with conservative settings
+            try:
+                self.voice_client = await self.voice_channel.connect(
+                    reconnect=False,  # Disable auto-reconnect to prevent conflicts
+                    timeout=60.0,     # Longer timeout for stability
+                    cls=discord.voice_client.VoiceClient
+                )
+                
+                # Wait for connection to stabilize
+                await asyncio.sleep(2.0)
+                
+                if self.voice_client and self.voice_client.is_connected():
+                    logger.info(f"Successfully connected to voice channel in room {self.room_id}")
+                    return True
+                else:
+                    logger.error("Voice client not connected after connection attempt")
+                    if self.voice_client:
+                        await self.voice_client.disconnect()
+                        self.voice_client = None
+                    return False
                         
-                except discord.errors.ConnectionClosed as e:
-                    logger.error(f"Discord connection closed with code {e.code} on attempt {attempt + 1}: {e}")
-                    if attempt < max_attempts - 1:
-                        wait_time = (attempt + 1) * 5  # Progressive backoff: 5s, 10s, 15s
-                        logger.info(f"Waiting {wait_time} seconds before retry...")
-                        await asyncio.sleep(wait_time)
-                    continue
-                except discord.errors.ClientException as e:
-                    if "Already connected to a voice channel" in str(e):
-                        logger.info("Already connected to voice channel")
-                        return True
-                    else:
-                        logger.error(f"Discord client exception on attempt {attempt + 1}: {e}")
-                        if attempt < max_attempts - 1:
-                            await asyncio.sleep(5)
-                        continue
-                except Exception as e:
-                    logger.error(f"Unexpected error during voice connection attempt {attempt + 1}: {type(e).__name__}: {e}")
-                    if attempt < max_attempts - 1:
-                        await asyncio.sleep(5)
-                    continue
+            except discord.errors.ConnectionClosed as e:
+                logger.error(f"Discord connection closed with code {e.code}: {e}")
+                return False
+            except discord.errors.ClientException as e:
+                if "Already connected to a voice channel" in str(e):
+                    logger.info("Already connected to voice channel")
+                    return True
+                else:
+                    logger.error(f"Discord client exception: {e}")
+                    return False
+            except Exception as e:
+                logger.error(f"Unexpected error during voice connection: {type(e).__name__}: {e}")
+                return False
             
-            logger.error(f"Failed to connect after {max_attempts} attempts")
-            return False
-                    
         except Exception as e:
             logger.error(f"Failed to connect to voice channel: {type(e).__name__}: {e}")
             return False
@@ -388,20 +358,23 @@ class ListeningRoom:
                 logger.info("Stopping currently playing audio...")
                 self.voice_client.stop()
                 # Wait longer for FFmpeg process to terminate
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(3.0)
                 
-                # Double-check if still playing
+                # Force disconnect and reconnect if still playing
                 if self.voice_client.is_playing():
                     logger.warning("Audio still playing after stop, forcing disconnect...")
                     await self.voice_client.disconnect()
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(2.0)
                     # Reconnect
-                    await self.connect_voice()
+                    success = await self.connect_voice()
+                    if not success:
+                        logger.error("Failed to reconnect after forcing disconnect")
+                        return False
             
             # Set start time for tracking playback duration
             self.start_time = time.time()
             
-            # Create FFmpeg audio source with minimal options
+            # Create FFmpeg audio source with minimal options for direct streaming
             ffmpeg_options = {
                 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
                 'options': '-vn'
@@ -501,19 +474,32 @@ class ListeningRoom:
             self.pause_time = None
             
             # Wait for FFmpeg process to terminate
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(3.0)
             
-            # Force disconnect and reconnect if process is still running
+            # Enhanced FFmpeg process management
             if hasattr(self.voice_client, '_player') and self.voice_client._player:
                 try:
                     # Check if FFmpeg process is still running
                     if hasattr(self.voice_client._player, '_process') and self.voice_client._player._process:
-                        if self.voice_client._player._process.poll() is None:
-                            logger.warning("FFmpeg process still running, forcing termination...")
-                            self.voice_client._player._process.terminate()
-                            await asyncio.sleep(1.0)
-                            if self.voice_client._player._process.poll() is None:
-                                self.voice_client._player._process.kill()
+                        process = self.voice_client._player._process
+                        if process.poll() is None:
+                            logger.warning("FFmpeg process still running, attempting graceful termination...")
+                            process.terminate()
+                            await asyncio.sleep(2.0)
+                            
+                            if process.poll() is None:
+                                logger.warning("FFmpeg process still running after terminate, forcing kill...")
+                                process.kill()
+                                await asyncio.sleep(1.0)
+                                
+                                if process.poll() is None:
+                                    logger.error("FFmpeg process still running after kill - this may cause issues")
+                                else:
+                                    logger.info("FFmpeg process successfully terminated")
+                            else:
+                                logger.info("FFmpeg process terminated gracefully")
+                        else:
+                            logger.info("FFmpeg process already terminated")
                 except Exception as e:
                     logger.error(f"Error managing FFmpeg process: {e}")
             
@@ -525,11 +511,9 @@ class ListeningRoom:
         if self.current_track < len(self.tracks) - 1:
             logger.info(f"Skipping to next track in room {self.room_id}")
             
-            # Stop current playback
+            # Stop current playback and wait for cleanup
             await self.stop()
-            
-            # Wait a moment for cleanup
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)  # Increased wait time for better cleanup
             
             # Move to next track
             self.current_track += 1
@@ -544,18 +528,18 @@ class ListeningRoom:
                     await self.text_channel.send(f"⏭️ Skipped to next track: **{track}**", silent=True)
             
             return success
-        return False
+        else:
+            logger.info("Already at the last track")
+            return False
     
     async def skip_to_previous(self) -> bool:
         """Skip to the previous track with enhanced error handling."""
         if self.current_track > 0:
             logger.info(f"Skipping to previous track in room {self.room_id}")
             
-            # Stop current playback
+            # Stop current playback and wait for cleanup
             await self.stop()
-            
-            # Wait a moment for cleanup
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)  # Increased wait time for better cleanup
             
             # Move to previous track
             self.current_track -= 1
@@ -570,7 +554,9 @@ class ListeningRoom:
                     await self.text_channel.send(f"⏮️ Skipped to previous track: **{track}**", silent=True)
             
             return success
-        return False
+        else:
+            logger.info("Already at the first track")
+            return False
     
     async def _track_finished(self, error):
         """Called when a track finishes playing."""
@@ -2781,11 +2767,13 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         category_name = f"🎵 {album} - {interaction.user.display_name}"
         try:
             # Create category with notification settings
-            # Everyone except the room creator will have notifications muted
+            # Category permissions - users can control their own voice state
             category_overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(
                     view_channel=True,  # Can see the category
                     connect=True,  # Can join voice channels
+                    speak=None,  # Allow users to control their own mute state
+                    use_voice_activation=True,  # Enable voice activation
                     read_message_history=True,  # Can read chat history
                     send_messages=True,  # Can send messages
                     add_reactions=True,  # Can react to messages
@@ -2796,7 +2784,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     # Room creator gets full permissions including notifications
                     view_channel=True,
                     connect=True,
-                    speak=True,
+                    speak=True,  # Room creator can always speak
                     use_voice_activation=True,
                     read_message_history=True,
                     send_messages=True,
@@ -2831,11 +2819,11 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         voice_channel_name = f"🎵 {album} - {interaction.user.display_name}"
         
         try:
-            # Set up permissions for listening room - default mics muted for focused listening
+            # Set up permissions for listening room - users can unmute themselves
             overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(
-                    speak=False,  # Mute mics by default
-                    use_voice_activation=False,  # Disable voice activation
+                    speak=None,  # Allow users to control their own mute state
+                    use_voice_activation=True,  # Enable voice activation
                     view_channel=True,  # Can see the channels
                     connect=True,  # Can join voice
                     read_message_history=True,  # Can read chat history
@@ -2844,7 +2832,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 ),
                 interaction.user: discord.PermissionOverwrite(
                     # Room creator can speak and use voice activation
-                    speak=True,
+                    speak=True,  # Room creator can always speak
                     use_voice_activation=True,
                     view_channel=True,
                     connect=True,
