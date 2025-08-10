@@ -290,21 +290,21 @@ class ListeningRoom:
                 
             logger.info(f"Connecting to voice channel: {self.voice_channel.name}")
             
-            # Try connection with more robust retry logic
-            max_retries = 5
-            base_delay = 3
+            # Try connection with optimized retry logic
+            max_retries = 3  # Reduced retries to minimize connection cycles
+            base_delay = 2   # Reduced base delay
             
             for attempt in range(max_retries):
                 try:
-                    # Connect with high quality settings and longer timeout
+                    # Connect with optimized settings
                     self.voice_client = await self.voice_channel.connect(
-                        reconnect=True, 
-                        timeout=45.0,  # Increased timeout
+                        reconnect=False,  # Disable auto-reconnect to prevent cycles
+                        timeout=30.0,     # Reduced timeout
                         cls=discord.voice_client.VoiceClient
                     )
                     
                     # Wait a moment for the connection to stabilize
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5)
                     
                     if self.voice_client and self.voice_client.is_connected():
                         logger.info(f"Successfully connected to voice channel in room {self.room_id}")
@@ -319,7 +319,7 @@ class ListeningRoom:
                         else:
                             logger.error("Voice client not connected after all connection attempts")
                             return False
-                        
+                            
                 except discord.errors.ConnectionClosed as e:
                     if attempt < max_retries - 1:
                         delay = base_delay * (attempt + 1)  # Exponential backoff
@@ -386,29 +386,34 @@ class ListeningRoom:
             track = self.current_track_info
             logger.info(f"Attempting to play track: {track} (file: {track.file_path})")
             
-            # Stop any currently playing audio
+            # Stop any currently playing audio and ensure cleanup
             if self.voice_client.is_playing():
                 self.voice_client.stop()
-                await asyncio.sleep(0.5)  # Give it a moment to stop
+                # Wait for the current process to terminate
+                await asyncio.sleep(1.0)
             
-            # Create FFmpeg audio source with minimal options
+            # Set start time for tracking playback duration
+            self.start_time = time.time()
+            
+            # Create FFmpeg audio source with minimal options for direct streaming
+            # Using only essential options to minimize conversion and delays
             ffmpeg_options = {
-                'before_options': '-reconnect 1',
-                'options': '-vn'
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                'options': '-vn -acodec copy'
             }
             
             if track.file_path.startswith("http"):
-                # Streaming URL (Plex)
+                # Streaming URL (Plex) - try to stream directly without transcoding
                 logger.info(f"Playing streaming URL: {track.file_path[:50]}...")
                 try:
                     source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
                     logger.info(f"Successfully created FFmpeg source for streaming URL")
                 except Exception as e:
-                    logger.error(f"Failed to create FFmpeg source for streaming URL: {e}")
-                    # Try with minimal options as fallback
+                    logger.error(f"Failed to create FFmpeg source with copy codec: {e}")
+                    # Fallback to minimal transcoding if copy fails
                     fallback_options = {
-                        'before_options': '-reconnect 1',
-                        'options': '-vn'
+                        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                        'options': '-vn -acodec libopus -b:a 96k'
                     }
                     source = discord.FFmpegPCMAudio(track.file_path, **fallback_options)
                     logger.info(f"Using fallback FFmpeg options for streaming")
@@ -429,7 +434,7 @@ class ListeningRoom:
             self.voice_client.play(source, after=after_playing)
             self.is_playing = True
             self.is_paused = False
-            self.start_time = time.time()
+            self.pause_time = None
             
             # Update now playing for all scrobbling users
             await scrobble_manager.update_now_playing_for_room(self, track)
@@ -447,6 +452,7 @@ class ListeningRoom:
             self.voice_client.pause()
             self.is_paused = True
             self.pause_time = time.time()
+            logger.info(f"Paused playback in room {self.room_id}")
     
     async def resume(self):
         """Resume playback."""
@@ -458,6 +464,7 @@ class ListeningRoom:
                 pause_duration = time.time() - self.pause_time
                 self.start_time += pause_duration
             self.pause_time = None
+            logger.info(f"Resumed playback in room {self.room_id}")
     
     async def stop(self):
         """Stop playback."""
@@ -465,10 +472,15 @@ class ListeningRoom:
             self.voice_client.stop()
             self.is_playing = False
             self.is_paused = False
+            self.pause_time = None
+            # Wait a moment for the process to terminate
+            await asyncio.sleep(0.5)
+            logger.info(f"Stopped playback in room {self.room_id}")
     
     async def skip_to_next(self) -> bool:
         """Skip to the next track."""
         if self.current_track < len(self.tracks) - 1:
+            logger.info(f"Skipping to next track in room {self.room_id}")
             await self.stop()
             self.current_track += 1
             return await self.play_current_track()
@@ -477,6 +489,7 @@ class ListeningRoom:
     async def skip_to_previous(self) -> bool:
         """Skip to the previous track."""
         if self.current_track > 0:
+            logger.info(f"Skipping to previous track in room {self.room_id}")
             await self.stop()
             self.current_track -= 1
             return await self.play_current_track()
@@ -3369,14 +3382,20 @@ async def show_quality(interaction: discord.Interaction):
     quality_info.append("• Optimized for real-time music streaming")
     
     quality_info.append("\n**Plex Streaming Improvements:**")
-    quality_info.append("• ✅ No forced format transcoding")
+    quality_info.append("• ✅ Direct audio streaming (no transcoding)")
     quality_info.append("• ✅ Optimized reconnect settings")
-    quality_info.append("• ✅ Timestamp handling enabled")
-    quality_info.append("• ✅ Fallback audio options")
+    quality_info.append("• ✅ Improved process cleanup")
+    quality_info.append("• ✅ Fallback to minimal transcoding if needed")
+    
+    quality_info.append("\n**Recent Connection Improvements:**")
+    quality_info.append("• ✅ Reduced connection retries to minimize cycles")
+    quality_info.append("• ✅ Disabled auto-reconnect to prevent loops")
+    quality_info.append("• ✅ Optimized timeout and delay settings")
+    quality_info.append("• ✅ Enhanced player button reliability")
     
     quality_info.append("\n⚠️ **Note:** Discord has a hard 96kbps limit")
     quality_info.append("We've optimized for the best possible quality within this limit!")
-    quality_info.append("\n💡 **Current Mode:** Downloads Apple Music for best source quality")
+    quality_info.append("\n💡 **Current Mode:** Direct streaming with minimal conversion")
     
     await interaction.followup.send("\n".join(quality_info))
 
