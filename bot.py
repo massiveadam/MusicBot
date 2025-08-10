@@ -354,27 +354,10 @@ class ListeningRoom:
                 self.voice_client.stop()
                 await asyncio.sleep(0.5)  # Give it a moment to stop
             
-            # Create FFmpeg audio source with maximum quality Opus encoding
+            # Create FFmpeg audio source with minimal options
             ffmpeg_options = {
-                'before_options': (
-                    '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 '
-                    '-probesize 10M -analyzeduration 10M '  # Reduced for faster startup
-                    '-fflags +discardcorrupt+genpts '  # Handle corrupt packets and generate timestamps
-                    '-avoid_negative_ts make_zero '  # Handle timestamp issues
-                ),
-                'options': (
-                    '-vn '  # No video
-                    '-acodec libopus '  # Use Opus codec (matches Discord's format)
-                    '-ar 48000 '  # 48kHz sample rate (Discord's native rate)
-                    '-ac 2 '  # Stereo
-                    '-b:a 96k '  # Discord's bitrate limit (maximum allowed)
-                    '-application audio '  # Optimize for music (not voip)
-                    '-frame_duration 20 '  # 20ms frame duration for low latency
-                    '-compression_level 10 '  # Maximum Opus compression quality
-                    '-vbr on '  # Variable bitrate for better quality
-                    '-packet_loss 0 '  # Optimize for lossless transmission
-                    '-filter:a volume=0.9,highpass=f=10,lowpass=f=20000 '  # Volume + frequency optimization
-                )
+                'before_options': '-reconnect 1',
+                'options': '-vn'
             }
             
             if track.file_path.startswith("http"):
@@ -385,10 +368,10 @@ class ListeningRoom:
                     logger.info(f"Successfully created FFmpeg source for streaming URL")
                 except Exception as e:
                     logger.error(f"Failed to create FFmpeg source for streaming URL: {e}")
-                    # Try with simpler options as fallback
+                    # Try with minimal options as fallback
                     fallback_options = {
-                        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                        'options': '-vn -acodec libopus -ar 48000 -ac 2 -b:a 96k -application audio'
+                        'before_options': '-reconnect 1',
+                        'options': '-vn'
                     }
                     source = discord.FFmpegPCMAudio(track.file_path, **fallback_options)
                     logger.info(f"Using fallback FFmpeg options for streaming")
