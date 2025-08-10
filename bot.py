@@ -814,8 +814,8 @@ class ListeningRoomManager:
             # Delete Discord channels
             try:
                 if room.text_channel:
-                    # Send farewell message before deleting
-                    await room.text_channel.send("🎵 **Listening room ended.** Thanks for listening together! 👋")
+                    # Send farewell message before deleting (silent to avoid notifications)
+                    await room.text_channel.send("🎵 **Listening room ended.** Thanks for listening together! 👋", silent=True)
                     await asyncio.sleep(2)  # Give people time to see the message
                     await room.text_channel.delete(reason="Listening room ended")
                     logger.info(f"Deleted text channel for room {room_id}")
@@ -905,7 +905,7 @@ class PlaybackControlView(discord.ui.View):
             
             # Announce the action
             if room.text_channel:
-                await room.text_channel.send(f"{emoji} **{interaction.user.display_name}** {action} the music")
+                await room.text_channel.send(f"{emoji} **{interaction.user.display_name}** {action} the music", silent=True)
                 
         except Exception as e:
             logger.error(f"Play/pause error: {e}")
@@ -933,7 +933,7 @@ class PlaybackControlView(discord.ui.View):
             
             if success and room.text_channel:
                 track = room.current_track_info
-                await room.text_channel.send(f"⏮️ **{interaction.user.display_name}** skipped to previous track: **{track}**")
+                await room.text_channel.send(f"⏮️ **{interaction.user.display_name}** skipped to previous track: **{track}**", silent=True)
             
         except Exception as e:
             logger.error(f"Previous track error: {e}")
@@ -961,7 +961,7 @@ class PlaybackControlView(discord.ui.View):
             
             if success and room.text_channel:
                 track = room.current_track_info
-                await room.text_channel.send(f"⏭️ **{interaction.user.display_name}** skipped to next track: **{track}**")
+                await room.text_channel.send(f"⏭️ **{interaction.user.display_name}** skipped to next track: **{track}**", silent=True)
             
         except Exception as e:
             logger.error(f"Next track error: {e}")
@@ -984,7 +984,7 @@ class PlaybackControlView(discord.ui.View):
             await interaction.response.edit_message(view=self)
             
             if room.text_channel:
-                await room.text_channel.send(f"⏹️ **{interaction.user.display_name}** stopped the music")
+                await room.text_channel.send(f"⏹️ **{interaction.user.display_name}** stopped the music", silent=True)
             
         except Exception as e:
             logger.error(f"Stop playback error: {e}")
@@ -2649,12 +2649,19 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(
                     speak=False,  # Mute mics by default
-                    use_voice_activation=False  # Disable voice activation
+                    use_voice_activation=False,  # Disable voice activation
+                    view_channel=True,  # Can see the channels
+                    connect=True,  # Can join voice
+                    read_message_history=True,  # Can read chat history
+                    send_messages=True,  # Can send messages in chat
+                    add_reactions=True  # Can react to messages
                 ),
                 interaction.guild.me: discord.PermissionOverwrite(
                     speak=True,  # Bot can speak (for music)
                     connect=True,
-                    manage_channels=True
+                    manage_channels=True,
+                    send_messages=True,
+                    read_message_history=True
                 )
             }
             
@@ -2662,15 +2669,18 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 name=voice_channel_name,
                 category=category,
                 user_limit=room.max_participants,
-                overwrites=overwrites
+                overwrites=overwrites,
+                reason="Listening room created"  # Add reason for audit log
             )
             
-            # Create persistent text channel
+            # Create persistent text channel with notification suppression
             text_channel_name = f"💬-{album.lower().replace(' ', '-')}-chat"
             room.text_channel = await interaction.guild.create_text_channel(
                 name=text_channel_name,
                 category=category,
-                topic=f"Chat for listening to {artist} - {album} | Room ID: {room.room_id}"
+                topic=f"Chat for listening to {artist} - {album} | Room ID: {room.room_id}",
+                overwrites=overwrites,  # Use same permission overwrites
+                reason="Listening room created"  # Add reason for audit log
             )
             
         except Exception as e:
@@ -2727,16 +2737,16 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             # Public mode: everyone can see, but no pings/notifications
             await interaction.followup.send(embed=embed, view=view, suppress_embeds=False, silent=True)
         
-        # Send initial message to the text channel
+        # Send initial message to the text channel (silent to avoid notifications)
         welcome_msg = f"🎵 **Welcome to the listening room for {artist} - {album}!**\n\n"
         welcome_msg += f"• Join the voice channel: {room.voice_channel.mention}\n"
         welcome_msg += f"• Anyone can control the music using the buttons below\n"
         welcome_msg += f"• Room ID: `{room.room_id}`"
         
-        await room.text_channel.send(welcome_msg)
+        await room.text_channel.send(welcome_msg, silent=True)
         
         # Load tracks and start audio setup
-        loading_msg = await room.text_channel.send("📀 Loading tracks...")
+        loading_msg = await room.text_channel.send("📀 Loading tracks...", silent=True)
         
         # Load album tracks
         tracks_loaded = await room.load_tracks()
@@ -2796,11 +2806,11 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 embed=updated_embed,
                 view=playback_controls
             )
-            await room.text_channel.send(f"🎵 Auto-started playback! **{room.current_track_info}**")
+            await room.text_channel.send(f"🎵 Auto-started playback! **{room.current_track_info}**", silent=True)
         else:
             logger.error(f"Failed to auto-start playback after 3 attempts in room {room.room_id}")
-            await room.text_channel.send("⚠️ Tracks loaded but auto-start failed. Use the ▶️ button to start manually.")
-            await room.text_channel.send("💡 **Tip:** Try `/debug` and `/reconnect` if you have issues.")
+            await room.text_channel.send("⚠️ Tracks loaded but auto-start failed. Use the ▶️ button to start manually.", silent=True)
+            await room.text_channel.send("💡 **Tip:** Try `/debug` and `/reconnect` if you have issues.", silent=True)
         
         logger.info(f"Successfully created listening room {room.room_id} for {artist} - {album}")
         
@@ -2939,7 +2949,7 @@ async def on_interaction(interaction: discord.Interaction):
         
         # Announce in the text channel
         if room.text_channel:
-            await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})")
+            await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})", silent=True)
 
 
 # ==================== PLAYBACK CONTROL COMMANDS ====================
