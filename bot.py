@@ -373,7 +373,7 @@ class ListeningRoom:
                     '-compression_level 10 '  # Maximum Opus compression quality
                     '-vbr on '  # Variable bitrate for better quality
                     '-packet_loss 0 '  # Optimize for lossless transmission
-                    '-filter:a "volume=0.9,highpass=f=10,lowpass=f=20000" '  # Volume + frequency optimization
+                    '-filter:a volume=0.9,highpass=f=10,lowpass=f=20000 '  # Volume + frequency optimization
                 )
             }
             
@@ -388,7 +388,7 @@ class ListeningRoom:
                     # Try with simpler options as fallback
                     fallback_options = {
                         'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                        'options': '-vn -acodec libopus -ar 48000 -ac 2 -b:a 96k'
+                        'options': '-vn -acodec libopus -ar 48000 -ac 2 -b:a 96k -application audio'
                     }
                     source = discord.FFmpegPCMAudio(track.file_path, **fallback_options)
                     logger.info(f"Using fallback FFmpeg options for streaming")
@@ -742,10 +742,10 @@ class ListeningRoomManager:
         self.rooms: Dict[str, ListeningRoom] = {}  # room_id -> ListeningRoom
         self.user_rooms: Dict[int, str] = {}  # user_id -> room_id
         
-    def create_room(self, host: discord.Member, guild: discord.Guild, artist: str, album: str, source_type: str, source_data: str) -> ListeningRoom:
+    async def create_room(self, host: discord.Member, guild: discord.Guild, artist: str, album: str, source_type: str, source_data: str) -> ListeningRoom:
         """Create a new listening room."""
         # Remove user from any existing room first
-        self.leave_room(host)
+        await self.leave_room(host)
         
         room = ListeningRoom(host, guild, artist, album, source_type, source_data)
         self.rooms[room.room_id] = room
@@ -765,14 +765,14 @@ class ListeningRoomManager:
             return self.rooms.get(room_id)
         return None
         
-    def join_room(self, room_id: str, member: discord.Member) -> bool:
+    async def join_room(self, room_id: str, member: discord.Member) -> bool:
         """Add a user to a room. Returns True if successful."""
         room = self.get_room(room_id)
         if not room:
             return False
             
         # Remove from current room first
-        self.leave_room(member)
+        await self.leave_room(member)
         
         if room.add_participant(member):
             self.user_rooms[member.id] = room_id
@@ -2631,7 +2631,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 return
         
         # Create the listening room
-        room = room_manager.create_room(
+        room = await room_manager.create_room(
             host=interaction.user,
             guild=interaction.guild,
             artist=artist,
@@ -2822,7 +2822,7 @@ async def join_room_command(interaction: discord.Interaction, room_id: str):
         return
     
     # Try to join the room
-    success = room_manager.join_room(room_id, interaction.user)
+    success = await room_manager.join_room(room_id, interaction.user)
     if not success:
         room = room_manager.get_room(room_id)
         if not room:
@@ -2920,7 +2920,7 @@ async def on_interaction(interaction: discord.Interaction):
             return
         
         # Try to join the room
-        success = room_manager.join_room(room_id, interaction.user)
+        success = await room_manager.join_room(room_id, interaction.user)
         if not success:
             room = room_manager.get_room(room_id)
             if not room:
