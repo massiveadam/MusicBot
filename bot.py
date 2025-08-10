@@ -215,6 +215,7 @@ class ListeningRoom:
         # Channels
         self.voice_channel: Optional[discord.VoiceChannel] = None
         self.text_channel: Optional[discord.TextChannel] = None
+        self.category: Optional[discord.CategoryChannel] = None
         self.voice_client: Optional[discord.VoiceClient] = None
         
         # Participants
@@ -806,6 +807,10 @@ class ListeningRoomManager:
                 if room.voice_channel:
                     await room.voice_channel.delete(reason="Listening room ended")
                     logger.info(f"Deleted voice channel for room {room_id}")
+                    
+                if room.category:
+                    await room.category.delete(reason="Listening room ended")
+                    logger.info(f"Deleted category for room {room_id}")
                     
             except Exception as e:
                 logger.error(f"Error cleaning up channels for room {room_id}: {e}")
@@ -2623,9 +2628,61 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             source_data=source_data
         )
         
+        # Create a category for this listening room with notification settings
+        category_name = f"🎵 {album} - {interaction.user.display_name}"
+        try:
+            # Create category with notification settings
+            # Everyone except the room creator will have notifications muted
+            category_overwrites = {
+                interaction.guild.default_role: discord.PermissionOverwrite(
+                    view_channel=True,  # Can see the category
+                    connect=True,  # Can join voice channels
+                    read_message_history=True,  # Can read chat history
+                    send_messages=True,  # Can send messages
+                    add_reactions=True,  # Can react to messages
+                    # Mute notifications for everyone by default
+                    mention_everyone=False,  # Cannot mention @everyone
+                    mention_roles=False,  # Cannot mention roles
+                ),
+                interaction.user: discord.PermissionOverwrite(
+                    # Room creator gets full permissions including notifications
+                    view_channel=True,
+                    connect=True,
+                    speak=True,
+                    use_voice_activation=True,
+                    read_message_history=True,
+                    send_messages=True,
+                    add_reactions=True,
+                    mention_everyone=True,  # Can mention @everyone
+                    mention_roles=True,  # Can mention roles
+                ),
+                interaction.guild.me: discord.PermissionOverwrite(
+                    # Bot needs full permissions
+                    view_channel=True,
+                    connect=True,
+                    speak=True,
+                    manage_channels=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    mention_everyone=True,
+                    mention_roles=True,
+                )
+            }
+            
+            room.category = await interaction.guild.create_category(
+                name=category_name,
+                overwrites=category_overwrites,
+                reason="Listening room category created"
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to create category: {e}")
+            room_manager.cleanup_room(room.room_id)
+            await interaction.followup.send("❌ Failed to create listening room category.")
+            return
+        
         # Create voice channel
         voice_channel_name = f"🎵 {album} - {interaction.user.display_name}"
-        category = None  # You can set a specific category if you want
         
         try:
             # Set up permissions for listening room - default mics muted for focused listening
@@ -2639,6 +2696,16 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     send_messages=True,  # Can send messages in chat
                     add_reactions=True  # Can react to messages
                 ),
+                interaction.user: discord.PermissionOverwrite(
+                    # Room creator can speak and use voice activation
+                    speak=True,
+                    use_voice_activation=True,
+                    view_channel=True,
+                    connect=True,
+                    read_message_history=True,
+                    send_messages=True,
+                    add_reactions=True
+                ),
                 interaction.guild.me: discord.PermissionOverwrite(
                     speak=True,  # Bot can speak (for music)
                     connect=True,
@@ -2650,7 +2717,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             
             room.voice_channel = await interaction.guild.create_voice_channel(
                 name=voice_channel_name,
-                category=category,
+                category=room.category,  # Use the created category
                 user_limit=room.max_participants,
                 overwrites=overwrites,
                 reason="Listening room created"  # Add reason for audit log
@@ -2660,7 +2727,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             text_channel_name = f"💬-{album.lower().replace(' ', '-')}-chat"
             room.text_channel = await interaction.guild.create_text_channel(
                 name=text_channel_name,
-                category=category,
+                category=room.category,  # Use the created category
                 topic=f"Chat for listening to {artist} - {album} | Room ID: {room.room_id}",
                 overwrites=overwrites,  # Use same permission overwrites
                 reason="Listening room created"  # Add reason for audit log
@@ -2668,6 +2735,12 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             
         except Exception as e:
             logger.error(f"Failed to create channels: {e}")
+            # Clean up category if channel creation fails
+            if room.category:
+                try:
+                    await room.category.delete(reason="Channel creation failed")
+                except:
+                    pass
             room_manager.cleanup_room(room.room_id)
             await interaction.followup.send("❌ Failed to create voice/text channels.")
             return
@@ -2675,8 +2748,13 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         # Create room announcement embed
         embed = discord.Embed(
             title=f"🎵 Listening Room Created",
-            description=f"**{artist} - {album}**\n\nRoom ID: `{room.room_id}`\n\nAnyone can join and control the music!\n🔇 *Mics muted by default for focused listening*",
+            description=f"**{artist} - {album}**\n\nRoom ID: `{room.room_id}`\n\nAnyone can join and control the music!\n🔇 *Mics muted by default for focused listening*\n🔕 *Notifications muted for everyone except the room creator*",
             color=discord.Color.purple()
+        )
+        embed.add_field(
+            name="📁 Category", 
+            value=room.category.mention, 
+            inline=True
         )
         embed.add_field(
             name="🎧 Voice Channel", 
@@ -2711,6 +2789,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 f"🔇 **Silent room created!**\n\n"
                 f"**{artist} - {album}**\n"
                 f"Room ID: `{room.room_id}`\n"
+                f"Category: {room.category.mention}\n"
                 f"Voice: {room.voice_channel.mention}\n"
                 f"Chat: {room.text_channel.mention}\n\n"
                 f"Share the room ID or channels privately!",
