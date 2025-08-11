@@ -453,13 +453,13 @@ class ListeningRoom:
             # Based on research of working Discord music bots
             ffmpeg_options = {
                 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                'options': '-vn'
+                'options': '-vn -probesize 64k -analyzeduration 0 -fflags +nobuffer -flags low_delay'
             }
             
             # Alternative options if the simple approach fails
             alternative_options = {
                 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                'options': '-vn -acodec libopus -ar 48000 -ac 2'
+                'options': '-vn -acodec libopus -ar 48000 -ac 2 -probesize 64k -analyzeduration 0 -fflags +nobuffer -flags low_delay'
             }
             
             if track.file_path.startswith("http"):
@@ -600,33 +600,18 @@ class ListeningRoom:
             self.is_paused = False
             self.pause_time = None
             
-            # Wait for FFmpeg process to terminate
-            await asyncio.sleep(4.0)
-            
-            # Enhanced FFmpeg process management
+            # Brief settle, then ensure FFmpeg is terminated quickly (low-latency stop)
+            await asyncio.sleep(0.5)
             if hasattr(self.voice_client, '_player') and self.voice_client._player:
                 try:
-                    # Check if FFmpeg process is still running
-                    if hasattr(self.voice_client._player, '_process') and self.voice_client._player._process:
-                        process = self.voice_client._player._process
-                        if process.poll() is None:
-                            logger.warning("FFmpeg process still running, attempting graceful termination...")
-                            process.terminate()
-                            await asyncio.sleep(2.0)
-                            
-                            if process.poll() is None:
-                                logger.warning("FFmpeg process still running after terminate, forcing kill...")
-                                process.kill()
-                                await asyncio.sleep(1.0)
-                                
-                                if process.poll() is None:
-                                    logger.error("FFmpeg process still running after kill - this may cause issues")
-                                else:
-                                    logger.info("FFmpeg process successfully terminated")
-                            else:
-                                logger.info("FFmpeg process terminated gracefully")
-                        else:
-                            logger.info("FFmpeg process already terminated")
+                    proc = getattr(self.voice_client._player, '_process', None)
+                    if proc and proc.poll() is None:
+                        logger.warning("FFmpeg process still running, terminating...")
+                        proc.terminate()
+                        await asyncio.sleep(0.3)
+                        if proc.poll() is None:
+                            logger.warning("FFmpeg process still alive, killing...")
+                            proc.kill()
                 except Exception as e:
                     logger.error(f"Error managing FFmpeg process: {e}")
             
@@ -3245,7 +3230,14 @@ async def cleanup_all_rooms_command(interaction: discord.Interaction):
         return
     
     await room_manager.cleanup_all_rooms()
-    await interaction.followup.send(f"🧹 Cleaned up {rooms_count} listening rooms and their channels.")
+    try:
+        await interaction.followup.send(f"🧹 Cleaned up {rooms_count} listening rooms and their channels.")
+    except discord.errors.NotFound:
+        # Original response no longer exists; send a fresh ephemeral confirmation
+        await interaction.response.send_message(
+            f"🧹 Cleaned up {rooms_count} listening rooms and their channels.",
+            ephemeral=True
+        )
 
 
 # Handle button interactions for joining rooms
