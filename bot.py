@@ -3141,10 +3141,10 @@ async def join_room_command(interaction: discord.Interaction, room_id: str):
     
     # Check if user is already in a room
     current_room = room_manager.get_user_room(interaction.user.id)
-        if current_room:
-            # If they're marked as in a room but not actually in its participant list, clean it
-            if not any(p.id == interaction.user.id for p in current_room.participants):
-                await room_manager.leave_room(interaction.user)
+    if current_room:
+        # If they're marked as in a room but not actually in its participant list, clean it
+        if not any(p.id == interaction.user.id for p in current_room.participants):
+            await room_manager.leave_room(interaction.user)
         else:
             await interaction.followup.send(f"❌ You're already in room `{current_room.room_id}`. Leave it first with `/leave`.")
             return
