@@ -85,11 +85,13 @@ logger = logging.getLogger(__name__)
 class AudioTrack:
     """Represents a single audio track."""
     
-    def __init__(self, title: str, artist: str, file_path: str, duration: int = 0):
+    def __init__(self, title: str, artist: str, file_path: str, duration: int = 0, track_number: int | None = None, disc_number: int | None = None):
         self.title = title
         self.artist = artist
         self.file_path = file_path  # Local file path or temp file for downloaded tracks
         self.duration = duration  # Duration in seconds
+        self.track_number = track_number
+        self.disc_number = disc_number
         
     def __str__(self):
         return f"{self.artist} - {self.title}"
@@ -121,6 +123,8 @@ class AudioSource:
                 title = track.attrib.get("title", "Unknown")
                 artist = track.attrib.get("grandparentTitle", "Unknown Artist")
                 duration = int(track.attrib.get("duration", "0")) // 1000  # Convert to seconds
+                track_number = int(track.attrib.get("index", "0") or 0)
+                disc_number = int(track.attrib.get("parentIndex", "0") or 0)
                 
                 # Get the highest quality media file path
                 media_elements = track.findall(".//Media")
@@ -145,9 +149,15 @@ class AudioSource:
                         file_path = f"{config.PLEX_URL}{file_key}?X-Plex-Token={config.PLEX_TOKEN}"
                         
                         logger.info(f"Selected media with bitrate {best_bitrate}kbps for {title}")
-                        tracks.append(AudioTrack(title, artist, file_path, duration))
-                    
-            return sorted(tracks, key=lambda t: t.title)  # Sort by track title
+                        tracks.append(AudioTrack(title, artist, file_path, duration, track_number, disc_number))
+            
+            # Sort by disc then track number, fallback to title
+            tracks.sort(key=lambda t: (
+                (t.disc_number if isinstance(t.disc_number, int) and t.disc_number > 0 else 1),
+                (t.track_number if isinstance(t.track_number, int) and t.track_number > 0 else 9999),
+                t.title.lower()
+            ))
+            return tracks
             
         except Exception as e:
             logger.error(f"Failed to prepare local album: {e}")
@@ -179,7 +189,26 @@ class AudioSource:
                                 title = metadata.get('title', [file])[0] if isinstance(metadata.get('title'), list) else metadata.get('title', file)
                                 artist = metadata.get('artist', ['Unknown'])[0] if isinstance(metadata.get('artist'), list) else metadata.get('artist', 'Unknown')
                                 duration = int(getattr(metadata, 'length', 0))
-                                tracks.append(AudioTrack(title, artist, file_path, duration))
+                                # Try to read track/disc numbers
+                                track_number = None
+                                disc_number = None
+                                tn = metadata.get('tracknumber')
+                                if isinstance(tn, list):
+                                    tn = tn[0]
+                                if isinstance(tn, str):
+                                    try:
+                                        track_number = int(tn.split('/')[0])
+                                    except Exception:
+                                        pass
+                                dn = metadata.get('discnumber')
+                                if isinstance(dn, list):
+                                    dn = dn[0]
+                                if isinstance(dn, str):
+                                    try:
+                                        disc_number = int(dn.split('/')[0])
+                                    except Exception:
+                                        pass
+                                tracks.append(AudioTrack(title, artist, file_path, duration, track_number, disc_number))
                             else:
                                 # Fallback to filename
                                 tracks.append(AudioTrack(file, "Unknown Artist", file_path, 0))
@@ -187,7 +216,13 @@ class AudioSource:
                             logger.warning(f"Failed to read metadata from {file}: {e}")
                             tracks.append(AudioTrack(file, "Unknown Artist", file_path, 0))
             
-            return sorted(tracks, key=lambda t: t.title)
+            # Sort by disc then track number, fallback to title
+            tracks.sort(key=lambda t: (
+                (t.disc_number if isinstance(t.disc_number, int) and t.disc_number > 0 else 1),
+                (t.track_number if isinstance(t.track_number, int) and t.track_number > 0 else 9999),
+                t.title.lower()
+            ))
+            return tracks
             
         except Exception as e:
             logger.error(f"Failed to prepare Apple Music album: {e}")
@@ -230,6 +265,7 @@ class ListeningRoom:
         self.start_time = None
         self.pause_time = None
         self.temp_dir = None  # For Apple Music downloads
+        self._manual_stop_flag = False  # Prevent auto-advance on manual stop
         
         # Created timestamp
         self.created_at = time.time()
@@ -390,38 +426,25 @@ class ListeningRoom:
             track = self.current_track_info
             logger.info(f"Attempting to play track: {track} (file: {track.file_path})")
             
-            # Ensure any currently playing audio is fully stopped
-            if self.voice_client.is_playing():
-                logger.info("Stopping currently playing audio...")
+            # Ensure any currently playing or paused audio is fully stopped and drained
+            if self.voice_client.is_playing() or self.voice_client.is_paused():
+                logger.info("Stopping existing audio before starting new track...")
                 self.voice_client.stop()
-                # Wait longer for FFmpeg process to terminate
-                await asyncio.sleep(4.0)
-                
-                # Check if FFmpeg process is still running and force terminate
-                if hasattr(self.voice_client, '_player') and hasattr(self.voice_client._player, '_process'):
-                    process = self.voice_client._player._process
-                    if process and process.poll() is None:
-                        logger.warning("FFmpeg process still running, forcing termination...")
-                        try:
-                            process.terminate()
-                            await asyncio.sleep(2.0)
-                            if process.poll() is None:
-                                logger.warning("FFmpeg process still alive, killing...")
-                                process.kill()
-                                await asyncio.sleep(1.0)
-                        except Exception as e:
-                            logger.error(f"Error terminating FFmpeg process: {e}")
-                
-                # Force disconnect and reconnect if still playing
-                if self.voice_client.is_playing():
-                    logger.warning("Audio still playing after stop, forcing disconnect...")
-                    await self.voice_client.disconnect()
-                    await asyncio.sleep(2.0)
-                    # Reconnect
-                    success = await self.connect_voice()
-                    if not success:
-                        logger.error("Failed to reconnect after forcing disconnect")
-                        return False
+                await asyncio.sleep(0.5)
+                # Drain and hard-kill lingering ffmpeg if present
+                try:
+                    player = getattr(self.voice_client, "_player", None)
+                    proc = getattr(player, "_process", None) if player else None
+                    if proc and proc.poll() is None:
+                        logger.warning("FFmpeg process still running, terminating...")
+                        proc.terminate()
+                        # brief wait; then force kill if needed
+                        await asyncio.sleep(0.5)
+                        if proc.poll() is None:
+                            logger.warning("FFmpeg process still alive, killing...")
+                            proc.kill()
+                except Exception as e:
+                    logger.error(f"Error cleaning up FFmpeg process: {e}")
             
             # Set start time for tracking playback duration
             self.start_time = time.time()
@@ -485,7 +508,12 @@ class ListeningRoom:
                 else:
                     logger.info(f"Track finished: {track}")
                 # Schedule the track finished handler on the bot's event loop
-                bot.loop.call_soon_threadsafe(lambda: asyncio.create_task(self._track_finished(error)))
+                future = asyncio.run_coroutine_threadsafe(self._track_finished(error), bot.loop)
+                try:
+                    # Do not block; retrieve result opportunistically to surface exceptions in logs
+                    future.result(timeout=0)
+                except Exception:
+                    pass
             
             # Additional validation before playing
             if not source:
@@ -563,7 +591,9 @@ class ListeningRoom:
         """Stop playback with enhanced FFmpeg process management."""
         if self.voice_client:
             logger.info(f"Stopping playback in room {self.room_id}")
-            
+            # Mark that this stop is manual/intentional to avoid auto-advance from after-callback
+            self._manual_stop_flag = True
+
             # Stop the audio
             self.voice_client.stop()
             self.is_playing = False
@@ -605,62 +635,61 @@ class ListeningRoom:
             await self._update_ui()
     
     async def skip_to_next(self) -> bool:
-        """Skip to the next track with enhanced error handling."""
-        if self.current_track < len(self.tracks) - 1:
-            logger.info(f"Skipping to next track in room {self.room_id}")
-            
-            # Stop current playback and wait for cleanup
-            await self.stop()
-            await asyncio.sleep(1.0)  # Increased wait time for better cleanup
-            
-            # Move to next track
-            self.current_track += 1
-            
-            # Start playing the new track
-            success = await self.play_current_track()
-            
-            if success:
-                # Announce the track change
-                if self.text_channel:
+        """Skip to the next track with de-bounced logic to avoid double triggers."""
+        if getattr(self, "_skipping", False):
+            return False
+        self._skipping = True
+        try:
+            if self.current_track < len(self.tracks) - 1:
+                logger.info(f"Skipping to next track in room {self.room_id}")
+                # Stop current playback and wait briefly for cleanup
+                await self.stop()
+                await asyncio.sleep(0.3)
+                # Move to next track
+                self.current_track += 1
+                # Start playing the new track
+                success = await self.play_current_track()
+                if success and self.text_channel:
                     track = self.current_track_info
                     await self.text_channel.send(f"⏭️ Skipped to next track: **{track}**", silent=True)
-            
-            return success
-        else:
-            logger.info("Already at the last track")
-            return False
+                return success
+            else:
+                logger.info("Already at the last track")
+                return False
+        finally:
+            self._skipping = False
     
     async def skip_to_previous(self) -> bool:
-        """Skip to the previous track with enhanced error handling."""
-        if self.current_track > 0:
-            logger.info(f"Skipping to previous track in room {self.room_id}")
-            
-            # Stop current playback and wait for cleanup
-            await self.stop()
-            await asyncio.sleep(1.0)  # Increased wait time for better cleanup
-            
-            # Move to previous track
-            self.current_track -= 1
-            
-            # Start playing the new track
-            success = await self.play_current_track()
-            
-            if success:
-                # Announce the track change
-                if self.text_channel:
+        """Skip to the previous track with de-bounced logic to avoid double triggers."""
+        if getattr(self, "_skipping", False):
+            return False
+        self._skipping = True
+        try:
+            if self.current_track > 0:
+                logger.info(f"Skipping to previous track in room {self.room_id}")
+                await self.stop()
+                await asyncio.sleep(0.3)
+                self.current_track -= 1
+                success = await self.play_current_track()
+                if success and self.text_channel:
                     track = self.current_track_info
                     await self.text_channel.send(f"⏮️ Skipped to previous track: **{track}**", silent=True)
-            
-            return success
-        else:
-            logger.info("Already at the first track")
-            return False
+                return success
+            else:
+                logger.info("Already at the first track")
+                return False
+        finally:
+            self._skipping = False
     
     async def _track_finished(self, error):
         """Called when a track finishes playing."""
         if error:
             logger.error(f"Audio playback error: {error}")
         else:
+            # If we stopped manually (e.g., for skip), do not auto-advance
+            if getattr(self, "_manual_stop_flag", False):
+                self._manual_stop_flag = False
+                return
             # Scrobble the completed track for all participants
             if self.current_track_info:
                 # Check if track played for at least 30 seconds or half its duration (Last.fm requirement)
@@ -673,7 +702,7 @@ class ListeningRoom:
                     if scrobbled_users and self.text_channel:
                         await self.text_channel.send(f"🎵 Scrobbled to Last.fm for: {', '.join(scrobbled_users)}")
         
-        # Auto-advance to next track
+        # Auto-advance to next track (respect skip debounce)
         if not await self.skip_to_next():
             # End of album
             self.is_playing = False
@@ -980,6 +1009,10 @@ class ListeningRoomManager:
         """Remove a user from their current room. Returns room_id if they were in one."""
         current_room_id = self.user_rooms.get(member.id)
         if not current_room_id:
+            # Also check for stale participant presence in any room and clean
+            for rid, room in list(self.rooms.items()):
+                if member in room.participants:
+                    room.remove_participant(member)
             return None
             
         room = self.rooms.get(current_room_id)
@@ -3129,8 +3162,12 @@ async def join_room_command(interaction: discord.Interaction, room_id: str):
     # Check if user is already in a room
     current_room = room_manager.get_user_room(interaction.user.id)
     if current_room:
-        await interaction.followup.send(f"❌ You're already in room `{current_room.room_id}`. Leave it first with `/leave`.")
-        return
+        # If they're marked as in a room but not actually in its participant list, clean it
+        if interaction.user not in current_room.participants:
+            await room_manager.leave_room(interaction.user)
+        else:
+            await interaction.followup.send(f"❌ You're already in room `{current_room.room_id}`. Leave it first with `/leave`.")
+            return
     
     # Try to join the room
     success = await room_manager.join_room(room_id, interaction.user)
@@ -3224,11 +3261,15 @@ async def on_interaction(interaction: discord.Interaction):
         # Check if user is already in a room
         current_room = room_manager.get_user_room(interaction.user.id)
         if current_room:
-            await interaction.response.send_message(
-                f"❌ You're already in room `{current_room.room_id}`. Leave it first with `/leave`.",
-                ephemeral=True
-            )
-            return
+            # If user is not actually in participants (stale mapping), clear it
+            if interaction.user not in current_room.participants:
+                await room_manager.leave_room(interaction.user)
+            else:
+                await interaction.response.send_message(
+                    f"❌ You're already in room `{current_room.room_id}`. Leave it first with `/leave`.",
+                    ephemeral=True
+                )
+                return
         
         # Try to join the room
         success = await room_manager.join_room(room_id, interaction.user)
