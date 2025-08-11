@@ -277,7 +277,7 @@ class ListeningRoom:
             return False
     
     async def connect_voice(self) -> bool:
-        """Connect to the voice channel with simplified, reliable approach."""
+        """Connect to the voice channel with robust retry logic."""
         if not self.voice_channel:
             logger.error("No voice channel to connect to")
             return False
@@ -290,40 +290,77 @@ class ListeningRoom:
                 
             logger.info(f"Connecting to voice channel: {self.voice_channel.name}")
             
-            # Single, reliable connection attempt with conservative settings
-            try:
-                self.voice_client = await self.voice_channel.connect(
-                    reconnect=False,  # Disable auto-reconnect to prevent conflicts
-                    timeout=60.0,     # Longer timeout for stability
-                    cls=discord.voice_client.VoiceClient
-                )
-                
-                # Wait for connection to stabilize
-                await asyncio.sleep(2.0)
-                
-                if self.voice_client and self.voice_client.is_connected():
-                    logger.info(f"Successfully connected to voice channel in room {self.room_id}")
-                    return True
-                else:
-                    logger.error("Voice client not connected after connection attempt")
-                    if self.voice_client:
-                        await self.voice_client.disconnect()
-                        self.voice_client = None
-                    return False
+            # Robust connection with multiple strategies
+            max_attempts = 5
+            base_delay = 2.0
+            
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    logger.info(f"Connection attempt {attempt}/{max_attempts}")
+                    
+                    # Strategy 1: Standard connection
+                    if attempt <= 3:
+                        self.voice_client = await self.voice_channel.connect(
+                            reconnect=False,
+                            timeout=30.0,
+                            cls=discord.voice_client.VoiceClient
+                        )
+                    else:
+                        # Strategy 2: Force disconnect first, then connect
+                        if self.voice_client:
+                            await self.voice_client.disconnect()
+                            self.voice_client = None
+                            await asyncio.sleep(1.0)
                         
-            except discord.errors.ConnectionClosed as e:
-                logger.error(f"Discord connection closed with code {e.code}: {e}")
-                return False
-            except discord.errors.ClientException as e:
-                if "Already connected to a voice channel" in str(e):
-                    logger.info("Already connected to voice channel")
-                    return True
-                else:
-                    logger.error(f"Discord client exception: {e}")
-                    return False
-            except Exception as e:
-                logger.error(f"Unexpected error during voice connection: {type(e).__name__}: {e}")
-                return False
+                        self.voice_client = await self.voice_channel.connect(
+                            reconnect=False,
+                            timeout=45.0,
+                            cls=discord.voice_client.VoiceClient
+                        )
+                    
+                    # Wait for connection to stabilize
+                    await asyncio.sleep(3.0)
+                    
+                    if self.voice_client and self.voice_client.is_connected():
+                        logger.info(f"Successfully connected to voice channel in room {self.room_id}")
+                        return True
+                    else:
+                        logger.warning(f"Voice client not connected after attempt {attempt}")
+                        if self.voice_client:
+                            await self.voice_client.disconnect()
+                            self.voice_client = None
+                        
+                except discord.errors.ConnectionClosed as e:
+                    logger.error(f"Discord connection closed with code {e.code} (attempt {attempt}): {e}")
+                    if e.code == 4006:
+                        # This is a known issue, try again with longer delay
+                        delay = base_delay * (2 ** (attempt - 1))
+                        logger.info(f"Waiting {delay}s before retry...")
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        return False
+                        
+                except discord.errors.ClientException as e:
+                    if "Already connected to a voice channel" in str(e):
+                        logger.info("Already connected to voice channel")
+                        return True
+                    else:
+                        logger.error(f"Discord client exception (attempt {attempt}): {e}")
+                        if attempt == max_attempts:
+                            return False
+                        await asyncio.sleep(base_delay)
+                        continue
+                        
+                except Exception as e:
+                    logger.error(f"Unexpected error during voice connection (attempt {attempt}): {type(e).__name__}: {e}")
+                    if attempt == max_attempts:
+                        return False
+                    await asyncio.sleep(base_delay)
+                    continue
+            
+            logger.error(f"Failed to connect after {max_attempts} attempts")
+            return False
             
         except Exception as e:
             logger.error(f"Failed to connect to voice channel: {type(e).__name__}: {e}")
@@ -358,7 +395,22 @@ class ListeningRoom:
                 logger.info("Stopping currently playing audio...")
                 self.voice_client.stop()
                 # Wait longer for FFmpeg process to terminate
-                await asyncio.sleep(3.0)
+                await asyncio.sleep(4.0)
+                
+                # Check if FFmpeg process is still running and force terminate
+                if hasattr(self.voice_client, '_player') and hasattr(self.voice_client._player, '_process'):
+                    process = self.voice_client._player._process
+                    if process and process.poll() is None:
+                        logger.warning("FFmpeg process still running, forcing termination...")
+                        try:
+                            process.terminate()
+                            await asyncio.sleep(2.0)
+                            if process.poll() is None:
+                                logger.warning("FFmpeg process still alive, killing...")
+                                process.kill()
+                                await asyncio.sleep(1.0)
+                        except Exception as e:
+                            logger.error(f"Error terminating FFmpeg process: {e}")
                 
                 # Force disconnect and reconnect if still playing
                 if self.voice_client.is_playing():
@@ -374,17 +426,28 @@ class ListeningRoom:
             # Set start time for tracking playback duration
             self.start_time = time.time()
             
-            # Create FFmpeg audio source with minimal options for direct streaming
+            # Create FFmpeg audio source with optimized options for direct streaming
             ffmpeg_options = {
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 0 -probesize 32',
+                'options': '-vn -acodec copy'
+            }
+            
+            # Fallback options if copy fails
+            fallback_options = {
                 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                'options': '-vn'
+                'options': '-vn -acodec libopus -b:a 96k'
             }
             
             if track.file_path.startswith("http"):
-                # Streaming URL (Plex) - use minimal options
+                # Streaming URL (Plex) - try direct copy first, fallback to transcoding
                 logger.info(f"Playing streaming URL: {track.file_path[:50]}...")
-                source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
-                logger.info(f"Successfully created FFmpeg source for streaming URL")
+                try:
+                    source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
+                    logger.info(f"Successfully created FFmpeg source with direct copy")
+                except Exception as e:
+                    logger.warning(f"Direct copy failed, using fallback transcoding: {e}")
+                    source = discord.FFmpegPCMAudio(track.file_path, **fallback_options)
+                    logger.info(f"Successfully created FFmpeg source with fallback transcoding")
             else:
                 # Local file
                 logger.info(f"Playing local file: {track.file_path}")
@@ -426,15 +489,18 @@ class ListeningRoom:
                     # Update the embed
                     updated_embed = await create_now_playing_embed(self)
                     
-                    # Update the view
+                    # Create new view with updated buttons
                     playback_controls = PlaybackControlView(self.room_id)
                     await playback_controls.update_buttons(self)
                     
-                    # Edit the message
+                    # Edit the message with new embed and view
                     await self.now_playing_message.edit(
                         embed=updated_embed,
                         view=playback_controls
                     )
+                    logger.info(f"Updated UI for room {self.room_id}")
+                except discord.errors.NotFound:
+                    logger.warning(f"Now playing message not found for room {self.room_id}")
                 except Exception as e:
                     logger.error(f"Failed to update UI: {e}")
         except Exception as e:
@@ -474,7 +540,7 @@ class ListeningRoom:
             self.pause_time = None
             
             # Wait for FFmpeg process to terminate
-            await asyncio.sleep(3.0)
+            await asyncio.sleep(4.0)
             
             # Enhanced FFmpeg process management
             if hasattr(self.voice_client, '_player') and self.voice_client._player:
@@ -504,6 +570,7 @@ class ListeningRoom:
                     logger.error(f"Error managing FFmpeg process: {e}")
             
             logger.info(f"Stopped playback in room {self.room_id}")
+            # Update UI after stopping
             await self._update_ui()
     
     async def skip_to_next(self) -> bool:
@@ -2772,7 +2839,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 interaction.guild.default_role: discord.PermissionOverwrite(
                     view_channel=True,  # Can see the category
                     connect=True,  # Can join voice channels
-                    speak=None,  # Allow users to control their own mute state
+                    speak=False,  # Users start muted but can unmute themselves
                     use_voice_activation=True,  # Enable voice activation
                     read_message_history=True,  # Can read chat history
                     send_messages=True,  # Can send messages
@@ -2822,7 +2889,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             # Set up permissions for listening room - users can unmute themselves
             overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(
-                    speak=None,  # Allow users to control their own mute state
+                    speak=False,  # Users start muted but can unmute themselves
                     use_voice_activation=True,  # Enable voice activation
                     view_channel=True,  # Can see the channels
                     connect=True,  # Can join voice
