@@ -426,42 +426,73 @@ class ListeningRoom:
             # Set start time for tracking playback duration
             self.start_time = time.time()
             
-            # Create FFmpeg audio source with optimized options for direct streaming
+            # Create FFmpeg audio source with simplified, proven options
+            # Based on research of working Discord music bots
             ffmpeg_options = {
-                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 0 -probesize 32',
-                'options': '-vn -acodec copy'
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                'options': '-vn'
             }
             
-            # Fallback options if copy fails
-            fallback_options = {
+            # Alternative options if the simple approach fails
+            alternative_options = {
                 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                'options': '-vn -acodec libopus -b:a 96k'
+                'options': '-vn -acodec libopus -ar 48000 -ac 2'
             }
             
             if track.file_path.startswith("http"):
-                # Streaming URL (Plex) - try direct copy first, fallback to transcoding
+                # Streaming URL (Plex) - use simplified approach first
                 logger.info(f"Playing streaming URL: {track.file_path[:50]}...")
                 try:
-                    source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
-                    logger.info(f"Successfully created FFmpeg source with direct copy")
+                    # Try FFmpegOpusAudio first (Discord-native format)
+                    source = discord.FFmpegOpusAudio(track.file_path, **ffmpeg_options)
+                    logger.info(f"Successfully created FFmpegOpusAudio source with simple options")
                 except Exception as e:
-                    logger.warning(f"Direct copy failed, using fallback transcoding: {e}")
-                    source = discord.FFmpegPCMAudio(track.file_path, **fallback_options)
-                    logger.info(f"Successfully created FFmpeg source with fallback transcoding")
+                    logger.warning(f"FFmpegOpusAudio failed, trying FFmpegPCMAudio: {e}")
+                    try:
+                        # Fallback to FFmpegPCMAudio with basic options
+                        source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
+                        logger.info(f"Successfully created FFmpegPCMAudio source with simple options")
+                    except Exception as e2:
+                        logger.warning(f"Simple options failed, trying alternative: {e2}")
+                        try:
+                            # Last resort with explicit Opus encoding
+                            source = discord.FFmpegOpusAudio(track.file_path, **alternative_options)
+                            logger.info(f"Successfully created FFmpegOpusAudio source with alternative options")
+                        except Exception as e3:
+                            logger.error(f"All audio source creation methods failed: {e3}")
+                            return False
             else:
-                # Local file
+                # Local file - use simplified approach
                 logger.info(f"Playing local file: {track.file_path}")
-                source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
+                try:
+                    source = discord.FFmpegOpusAudio(track.file_path, **ffmpeg_options)
+                    logger.info(f"Successfully created FFmpegOpusAudio source for local file")
+                except Exception as e:
+                    logger.warning(f"FFmpegOpusAudio failed for local file, trying FFmpegPCMAudio: {e}")
+                    try:
+                        source = discord.FFmpegPCMAudio(track.file_path, **ffmpeg_options)
+                        logger.info(f"Successfully created FFmpegPCMAudio source for local file")
+                    except Exception as e2:
+                        logger.error(f"Failed to create audio source for local file: {e2}")
+                        return False
             
             # Play the audio with error callback
             def after_playing(error):
                 if error:
                     logger.error(f"Audio playback error: {error}")
+                    logger.error(f"Error type: {type(error).__name__}")
+                    logger.error(f"Error details: {str(error)}")
                 else:
                     logger.info(f"Track finished: {track}")
                 # Schedule the track finished handler on the bot's event loop
                 bot.loop.call_soon_threadsafe(lambda: asyncio.create_task(self._track_finished(error)))
             
+            # Additional validation before playing
+            if not source:
+                logger.error("FFmpeg source is None, cannot play")
+                return False
+                
+            logger.info(f"Starting playback with FFmpeg source for track: {track}")
             self.voice_client.play(source, after=after_playing)
             self.is_playing = True
             self.is_paused = False
@@ -1224,6 +1255,7 @@ async def create_now_playing_embed(room: ListeningRoom) -> discord.Embed:
 intents = discord.Intents.default()
 intents.message_content = True  # Required for reading mentions in messages
 intents.members = True  # ✅ add this line
+intents.voice_states = True  # Ensure voice state events are available
 saved_embeds = {}  # message_id: { "url": str, "user_id": int }
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -2916,10 +2948,13 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 )
             }
             
+            # Determine an appropriate bitrate (Discord caps depend on server boost). We'll request 96 kbps.
+            bitrate_bps = 96_000
             room.voice_channel = await interaction.guild.create_voice_channel(
                 name=voice_channel_name,
                 category=room.category,  # Use the created category
                 user_limit=room.max_participants,
+                bitrate=bitrate_bps,
                 overwrites=overwrites,
                 reason="Listening room created"  # Add reason for audit log
             )
@@ -3507,6 +3542,141 @@ async def test_plex_streaming(interaction: discord.Interaction, album_name: str)
     except Exception as e:
         logger.error(f"Plex test error: {e}")
         await interaction.followup.send(f"❌ Test failed: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="test_audio", description="[Debug] Test audio streaming with current FFmpeg settings")
+@app_commands.describe(album_name="Album name to test audio streaming for")
+async def test_audio_streaming(interaction: discord.Interaction, album_name: str):
+    """Test audio streaming with current FFmpeg configuration."""
+    if not config.PLEX_TOKEN or not config.PLEX_URL:
+        await interaction.response.send_message("❌ Plex integration is not configured.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    try:
+        # Search for the album
+        headers = {"X-Plex-Token": config.PLEX_TOKEN}
+        search_url = f"{config.PLEX_URL}/library/search?query={sanitize_query(album_name)}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(search_url, headers=headers) as response:
+                if response.status != 200:
+                    await interaction.followup.send("❌ Failed to search Plex library.", ephemeral=True)
+                    return
+                xml = await response.text()
+        
+        root = ET.fromstring(xml)
+        best_match = None
+        best_score = 0
+        
+        for elem in root.findall(".//Directory") + root.findall(".//Video"):
+            if elem.attrib.get("type") != "album":
+                continue
+            
+            title = elem.attrib.get("title", "")
+            artist = elem.attrib.get("parentTitle", "")
+            combined = f"{artist} - {title}"
+            score = fuzz.token_sort_ratio(album_name.lower(), combined.lower())
+            
+            if score > best_score:
+                best_score = score
+                best_match = {
+                    "title": title,
+                    "artist": artist,
+                    "key": elem.attrib.get("key", ""),
+                    "combined": combined
+                }
+        
+        if not best_match or best_score < 50:
+            await interaction.followup.send(f"❌ No suitable album found for '{album_name}'.", ephemeral=True)
+            return
+        
+        # Test simplified FFmpeg configuration (based on research)
+        ffmpeg_options = {
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+            'options': '-vn'
+        }
+        
+        # Get first track URL
+        album_url = f"{config.PLEX_URL}{best_match['key']}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(album_url, headers=headers) as response:
+                if response.status != 200:
+                    await interaction.followup.send("❌ Failed to fetch album details.", ephemeral=True)
+                    return
+                album_xml = await response.text()
+        
+        album_root = ET.fromstring(album_xml)
+        first_track = album_root.find(".//Track")
+        
+        if first_track is None:
+            await interaction.followup.send("❌ No tracks found in album.", ephemeral=True)
+            return
+        
+        # Get track details
+        title = first_track.attrib.get("title", "Unknown")
+        duration = int(first_track.attrib.get("duration", "0")) // 1000
+        
+        media_elements = first_track.findall(".//Media")
+        if not media_elements:
+            await interaction.followup.send("❌ No media found for track.", ephemeral=True)
+            return
+        
+        best_media = media_elements[0]
+        bitrate = int(best_media.attrib.get("bitrate", "0"))
+        container = best_media.attrib.get("container", "unknown")
+        codec = best_media.attrib.get("codec", "unknown")
+        
+        part = best_media.find(".//Part")
+        if part is None:
+            await interaction.followup.send("❌ No audio part found for track.", ephemeral=True)
+            return
+        
+        file_key = part.attrib.get("key", "")
+        streaming_url = f"{config.PLEX_URL}{file_key}?X-Plex-Token={config.PLEX_TOKEN}"
+        
+        # Test FFmpeg source creation with multiple fallbacks
+        ffmpeg_status = "❌ All methods failed"
+        try:
+            # Try FFmpegOpusAudio first (Discord-native format)
+            source = discord.FFmpegOpusAudio(streaming_url, **ffmpeg_options)
+            ffmpeg_status = "✅ FFmpegOpusAudio Success"
+        except Exception as e:
+            try:
+                # Fallback to FFmpegPCMAudio
+                source = discord.FFmpegPCMAudio(streaming_url, **ffmpeg_options)
+                ffmpeg_status = "✅ FFmpegPCMAudio Success"
+            except Exception as e2:
+                try:
+                    # Last resort with explicit Opus encoding
+                    alternative_options = {
+                        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                        'options': '-vn -acodec libopus -ar 48000 -ac 2'
+                    }
+                    source = discord.FFmpegOpusAudio(streaming_url, **alternative_options)
+                    ffmpeg_status = "✅ FFmpegOpusAudio (Alternative) Success"
+                except Exception as e3:
+                    ffmpeg_status = f"❌ All methods failed: {str(e3)[:100]}"
+        
+        # Build response
+        embed = discord.Embed(
+            title="🎵 Audio Streaming Test",
+            description=f"**Album:** {best_match['combined']} (Score: {best_score}%)",
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(name="Track Info", value=f"**Title:** {title}\n**Duration:** {duration}s\n**Bitrate:** {bitrate}kbps\n**Format:** {container}/{codec}", inline=False)
+        embed.add_field(name="FFmpeg Test", value=ffmpeg_status, inline=False)
+        embed.add_field(name="Streaming URL", value=f"`{streaming_url[:80]}...`", inline=False)
+        embed.add_field(name="FFmpeg Options", value=f"```{ffmpeg_options['options']}```", inline=False)
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        logger.error(f"Test audio streaming error: {e}")
+        await interaction.followup.send(f"❌ Error testing audio streaming: {e}", ephemeral=True)
 
 
 @bot.tree.command(name="quality", description="Show current audio quality settings")
