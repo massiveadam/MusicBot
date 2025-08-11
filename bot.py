@@ -686,7 +686,15 @@ class ListeningRoom:
                 if play_duration >= min_scrobble_time:
                     scrobbled_users = await scrobble_manager.scrobble_for_room_participants(self, self.current_track_info)
                     if scrobbled_users and self.text_channel:
-                        await self.text_channel.send(f"🎵 Scrobbled to Last.fm for: {', '.join(scrobbled_users)}")
+                        await self.text_channel.send(f"🎵 Scrobbled to Last.fm for: {', '.join(scrobbled_users)}", silent=True)
+                else:
+                    if self.text_channel:
+                        remaining = int(min_scrobble_time - play_duration)
+                        if remaining > 0:
+                            await self.text_channel.send(
+                                f"⌛ Not scrobbled (played {int(play_duration)}s, need {int(min_scrobble_time)}s)",
+                                silent=True
+                            )
         
         # Auto-advance to next track (respect skip debounce)
         if not await self.skip_to_next():
@@ -772,7 +780,13 @@ class ScrobbleManager:
     
     def __init__(self):
         self.users: Dict[int, ScrobbleUser] = {}  # discord_id -> ScrobbleUser
-        self.scrobble_data_file = "scrobble_users.json"
+        # Persist inside /app/.beets (already a volume) unless overridden
+        self.scrobble_data_file = os.getenv("SCROBBLE_DATA_FILE", "/app/.beets/scrobble_users.json")
+        # Ensure parent directory exists
+        try:
+            os.makedirs(os.path.dirname(self.scrobble_data_file), exist_ok=True)
+        except Exception:
+            pass
         self._load_users()
     
     def _load_users(self):
@@ -831,8 +845,8 @@ class ScrobbleManager:
         timestamp = int(time.time())
         scrobbled_users = []
         
-        for participant_id in room.participants:
-            user = self.get_user(participant_id)
+        for participant in room.participants:
+            user = self.get_user(getattr(participant, 'id', participant))
             if user:
                 success = await user.scrobble_track(track, timestamp)
                 if success:
@@ -847,8 +861,8 @@ class ScrobbleManager:
         """Update now playing for all participants in a room who have scrobbling enabled."""
         updated_users = []
         
-        for participant_id in room.participants:
-            user = self.get_user(participant_id)
+        for participant in room.participants:
+            user = self.get_user(getattr(participant, 'id', participant))
             if user:
                 success = await user.update_now_playing(track)
                 if success:
@@ -3917,13 +3931,21 @@ async def scrobble_status(interaction: discord.Interaction):
     if not user:
         embed = discord.Embed(
             title="🎵 Scrobbling Status",
-            description="❌ **Not set up**\n\nUse `/scrobble_setup` to connect your Last.fm account!",
+            description=(
+                "❌ **Not set up**\n\n"
+                "Use `/scrobble_setup` to connect your Last.fm account!\n\n"
+                "After setup, tracks will scrobble when either half the track or 30s has played (whichever is less)."
+            ),
             color=0xff0000
         )
     else:
         embed = discord.Embed(
             title="🎵 Scrobbling Status",
-            description=f"✅ **Connected to Last.fm**\n\n**Username:** {user.lastfm_username}\n**Status:** Ready to scrobble!",
+            description=(
+                f"✅ **Connected to Last.fm**\n\n**Username:** {user.lastfm_username}\n"
+                "**Status:** Ready to scrobble!\n\n"
+                "Tracks scrobble after 30s or half duration (whichever is less)."
+            ),
             color=0x00ff00
         )
         embed.set_footer(text="Tracks will be scrobbled automatically when you listen in rooms.")
@@ -4046,9 +4068,14 @@ async def complete_scrobble_setup(interaction: discord.Interaction, token: str):
         
         embed = discord.Embed(
             title="✅ Last.fm Scrobbling Enabled!",
-            description=f"**Username:** {username}\n**Status:** Ready to scrobble!\n\nYour listening activity in rooms will now be automatically scrobbled to Last.fm.",
+            description=(
+                f"**Username:** {username}\n**Status:** Ready to scrobble!\n\n"
+                "Your listening activity in rooms will now scrobble automatically.\n"
+                "We persist your credentials in a secure file so you won't need to re-link after restarts."
+            ),
             color=0x00ff00
         )
+        embed.set_footer(text="Scrobbles send after 30s or half track duration, whichever is less.")
         await interaction.followup.send(embed=embed)
         
     except Exception as e:
