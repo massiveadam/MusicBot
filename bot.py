@@ -282,7 +282,7 @@ class ListeningRoom:
         
     def add_participant(self, member: discord.Member) -> bool:
         """Add a participant to the room. Returns True if successful."""
-        if member in self.participants:
+        if any(p.id == member.id for p in self.participants):
             return False
         if self.is_full:
             return False
@@ -291,9 +291,10 @@ class ListeningRoom:
         
     def remove_participant(self, member: discord.Member) -> bool:
         """Remove a participant from the room. Returns True if successful."""
-        if member in self.participants:
-            self.participants.remove(member)
-            return True
+        for p in list(self.participants):
+            if p.id == member.id:
+                self.participants.remove(p)
+                return True
         return False
         
     async def load_tracks(self) -> bool:
@@ -1103,8 +1104,6 @@ class PlaybackControlView(discord.ui.View):
             return
         
         try:
-            await interaction.response.defer(thinking=True, ephemeral=True)
-            
             if room.is_playing and not room.is_paused:
                 # Pause
                 await room.pause()
@@ -1122,10 +1121,7 @@ class PlaybackControlView(discord.ui.View):
             
             # Update the UI
             await self.update_buttons(room)
-            await interaction.followup.edit_message(
-                message_id=interaction.message.id,
-                view=self
-            )
+            await interaction.response.edit_message(view=self)
             
             # Announce the action
             if room.text_channel:
@@ -1133,7 +1129,7 @@ class PlaybackControlView(discord.ui.View):
                 
         except Exception as e:
             logger.error(f"Play/pause error: {e}")
-            await interaction.followup.send("❌ Failed to control playback.", ephemeral=True)
+            await interaction.response.send_message("❌ Failed to control playback.", ephemeral=True)
     
     @discord.ui.button(label="⏮️ Previous", style=discord.ButtonStyle.secondary, custom_id="previous")
     async def previous_track(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1151,14 +1147,9 @@ class PlaybackControlView(discord.ui.View):
             return
         
         try:
-            await interaction.response.defer(thinking=True, ephemeral=True)
-            
             success = await room.skip_to_previous()
             await self.update_buttons(room)
-            await interaction.followup.edit_message(
-                message_id=interaction.message.id,
-                view=self
-            )
+            await interaction.response.edit_message(view=self)
             
             if success and room.text_channel:
                 track = room.current_track_info
@@ -1166,7 +1157,7 @@ class PlaybackControlView(discord.ui.View):
             
         except Exception as e:
             logger.error(f"Previous track error: {e}")
-            await interaction.followup.send("❌ Failed to skip to previous track.", ephemeral=True)
+            await interaction.response.send_message("❌ Failed to skip to previous track.", ephemeral=True)
     
     @discord.ui.button(label="⏭️ Next", style=discord.ButtonStyle.secondary, custom_id="next")
     async def next_track(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1184,14 +1175,9 @@ class PlaybackControlView(discord.ui.View):
             return
         
         try:
-            await interaction.response.defer(thinking=True, ephemeral=True)
-            
             success = await room.skip_to_next()
             await self.update_buttons(room)
-            await interaction.followup.edit_message(
-                message_id=interaction.message.id,
-                view=self
-            )
+            await interaction.response.edit_message(view=self)
             
             if success and room.text_channel:
                 track = room.current_track_info
@@ -1199,7 +1185,7 @@ class PlaybackControlView(discord.ui.View):
             
         except Exception as e:
             logger.error(f"Next track error: {e}")
-            await interaction.followup.send("❌ Failed to skip to next track.", ephemeral=True)
+            await interaction.response.send_message("❌ Failed to skip to next track.", ephemeral=True)
     
     @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id="stop")
     async def stop_playback(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1213,21 +1199,16 @@ class PlaybackControlView(discord.ui.View):
             return
         
         try:
-            await interaction.response.defer(thinking=True, ephemeral=True)
-            
             await room.stop()
             await self.update_buttons(room)
-            await interaction.followup.edit_message(
-                message_id=interaction.message.id,
-                view=self
-            )
+            await interaction.response.edit_message(view=self)
             
             if room.text_channel:
                 await room.text_channel.send(f"⏹️ **{interaction.user.display_name}** stopped the music", silent=True)
             
         except Exception as e:
             logger.error(f"Stop playback error: {e}")
-            await interaction.followup.send("❌ Failed to stop playback.", ephemeral=True)
+            await interaction.response.send_message("❌ Failed to stop playback.", ephemeral=True)
 
 async def create_now_playing_embed(room: ListeningRoom) -> discord.Embed:
     """Create a 'Now Playing' embed for the room."""
@@ -3146,10 +3127,10 @@ async def join_room_command(interaction: discord.Interaction, room_id: str):
     
     # Check if user is already in a room
     current_room = room_manager.get_user_room(interaction.user.id)
-    if current_room:
-        # If they're marked as in a room but not actually in its participant list, clean it
-        if interaction.user not in current_room.participants:
-            await room_manager.leave_room(interaction.user)
+        if current_room:
+            # If they're marked as in a room but not actually in its participant list, clean it
+            if not any(p.id == interaction.user.id for p in current_room.participants):
+                await room_manager.leave_room(interaction.user)
         else:
             await interaction.followup.send(f"❌ You're already in room `{current_room.room_id}`. Leave it first with `/leave`.")
             return
@@ -3254,7 +3235,7 @@ async def on_interaction(interaction: discord.Interaction):
         current_room = room_manager.get_user_room(interaction.user.id)
         if current_room:
             # If user is not actually in participants (stale mapping), clear it
-            if interaction.user not in current_room.participants:
+            if not any(p.id == interaction.user.id for p in current_room.participants):
                 await room_manager.leave_room(interaction.user)
             else:
                 await interaction.response.send_message(
