@@ -327,18 +327,20 @@ class ListeningRoom:
                 
             logger.info(f"Connecting to voice channel: {self.voice_channel.name}")
             
-            # Robust connection with multiple strategies
+            # Robust connection with manual retry strategy only (disable library auto-retry)
             max_attempts = 8
             base_delay = 2.0
+            # Small initial jitter helps avoid immediate 4006 after channel creation
+            await asyncio.sleep(1.0)
             
             for attempt in range(1, max_attempts + 1):
                 try:
                     logger.info(f"Connection attempt {attempt}/{max_attempts}")
                     
-                    # Strategy 1: Standard connect with library reconnect enabled
+                    # Strategy 1: Standard connect without library auto-retry (we manage retries)
                     if attempt <= 4:
                         self.voice_client = await self.voice_channel.connect(
-                            reconnect=True,
+                            reconnect=False,
                             timeout=45.0,
                             self_deaf=True
                         )
@@ -354,7 +356,7 @@ class ListeningRoom:
                         # Small jitter before retrying
                         await asyncio.sleep(0.5 * attempt)
                         self.voice_client = await self.voice_channel.connect(
-                            reconnect=True,
+                            reconnect=False,
                             timeout=60.0,
                             self_deaf=True
                         )
