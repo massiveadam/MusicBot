@@ -328,35 +328,39 @@ class ListeningRoom:
             logger.info(f"Connecting to voice channel: {self.voice_channel.name}")
             
             # Robust connection with multiple strategies
-            max_attempts = 5
+            max_attempts = 8
             base_delay = 2.0
             
             for attempt in range(1, max_attempts + 1):
                 try:
                     logger.info(f"Connection attempt {attempt}/{max_attempts}")
                     
-                    # Strategy 1: Standard connection
-                    if attempt <= 3:
+                    # Strategy 1: Standard connect with library reconnect enabled
+                    if attempt <= 4:
                         self.voice_client = await self.voice_channel.connect(
-                            reconnect=False,
-                            timeout=30.0,
-                            cls=discord.voice_client.VoiceClient
+                            reconnect=True,
+                            timeout=45.0,
+                            self_deaf=True
                         )
                     else:
-                        # Strategy 2: Force disconnect first, then connect
+                        # Strategy 2: Hard reset, then connect fresh
                         if self.voice_client:
-                            await self.voice_client.disconnect()
+                            try:
+                                await self.voice_client.disconnect(force=True)
+                            except Exception:
+                                pass
                             self.voice_client = None
                             await asyncio.sleep(1.0)
-                        
+                        # Small jitter before retrying
+                        await asyncio.sleep(0.5 * attempt)
                         self.voice_client = await self.voice_channel.connect(
-                            reconnect=False,
-                            timeout=45.0,
-                            cls=discord.voice_client.VoiceClient
+                            reconnect=True,
+                            timeout=60.0,
+                            self_deaf=True
                         )
                     
                     # Wait for connection to stabilize
-                    await asyncio.sleep(3.0)
+                    await asyncio.sleep(2.0)
                     
                     if self.voice_client and self.voice_client.is_connected():
                         logger.info(f"Successfully connected to voice channel in room {self.room_id}")
@@ -368,15 +372,21 @@ class ListeningRoom:
                             self.voice_client = None
                         
                 except discord.errors.ConnectionClosed as e:
-                    logger.error(f"Discord connection closed with code {e.code} (attempt {attempt}): {e}")
-                    if e.code == 4006:
-                        # This is a known issue, try again with longer delay
-                        delay = base_delay * (2 ** (attempt - 1))
+                    code = getattr(e, 'code', None)
+                    logger.error(f"Discord connection closed with code {code} (attempt {attempt}): {e}")
+                    # 4006 session timeout: fully reset client and backoff
+                    if code == 4006:
+                        if self.voice_client:
+                            try:
+                                await self.voice_client.disconnect(force=True)
+                            except Exception:
+                                pass
+                            self.voice_client = None
+                        delay = min(32.0, base_delay * (2 ** (attempt - 1)))
                         logger.info(f"Waiting {delay}s before retry...")
                         await asyncio.sleep(delay)
                         continue
-                    else:
-                        return False
+                    return False
                         
                 except discord.errors.ClientException as e:
                     if "Already connected to a voice channel" in str(e):
@@ -389,6 +399,17 @@ class ListeningRoom:
                         await asyncio.sleep(base_delay)
                         continue
                         
+                except asyncio.TimeoutError:
+                    logger.error(f"Voice connect timed out (attempt {attempt})")
+                    if self.voice_client:
+                        try:
+                            await self.voice_client.disconnect(force=True)
+                        except Exception:
+                            pass
+                        self.voice_client = None
+                    await asyncio.sleep(base_delay * attempt)
+                    continue
+
                 except Exception as e:
                     logger.error(f"Unexpected error during voice connection (attempt {attempt}): {type(e).__name__}: {e}")
                     if attempt == max_attempts:
