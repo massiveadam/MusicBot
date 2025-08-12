@@ -476,14 +476,14 @@ class ListeningRoom:
             # Create FFmpeg audio source with simplified, proven options
             # Based on research of working Discord music bots
             ffmpeg_options = {
-                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                'options': '-vn -probesize 64k -analyzeduration 0 -fflags +nobuffer -flags low_delay'
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 5 -rw_timeout 5000000',
+                'options': '-vn -probesize 256k -analyzeduration 1M -use_wallclock_as_timestamps 1 -af aresample=async=1:min_hard_comp=0.100:first_pts=0'
             }
             
             # Alternative options if the simple approach fails
             alternative_options = {
-                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                'options': '-vn -acodec libopus -ar 48000 -ac 2 -probesize 64k -analyzeduration 0 -fflags +nobuffer -flags low_delay'
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 5 -rw_timeout 5000000',
+                'options': '-vn -acodec libopus -ar 48000 -ac 2 -b:a 96k -vbr constrained -compression_level 10 -application audio -frame_duration 60 -probesize 256k -analyzeduration 1M -use_wallclock_as_timestamps 1 -af aresample=async=1:min_hard_comp=0.100:first_pts=0'
             }
             
             if track.file_path.startswith("http"):
