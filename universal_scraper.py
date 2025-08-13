@@ -1,11 +1,14 @@
 import asyncio
 import re
 import json
+import logging
 from html import unescape
 import requests
 from playwright.async_api import async_playwright
 from demjson3 import decode
 import aiohttp
+
+logger = logging.getLogger(__name__)
 
 ODESLI_API = "https://api.song.link/v1-alpha.1/links"
 DEEZER_SEARCH_API = "https://api.deezer.com/search/album"
@@ -52,7 +55,7 @@ def infer_artist_album_from_url(url: str):
                     artist, album = match.group(1).split(" - ", 1)
                     return artist.strip(), album.strip()
         except Exception as e:
-            print(f"[WARN] AOTY metadata fetch failed: {e}")
+            logger.warning(f"AOTY metadata fetch failed: {e}")
 
         match = re.search(r"/album/\d+-([^.]+)\.php", url)
         if match:
@@ -107,7 +110,7 @@ def infer_artist_album_from_url(url: str):
                 if m:
                     return parse_quietus_title(m.group(1))
         except Exception as e:
-            print(f"[WARN] Quietus metadata fetch failed: {e}")
+            logger.warning(f"Quietus metadata fetch failed: {e}")
 
     if "pitchfork.com" in url:
         match = re.search(r"/reviews/albums/([a-z0-9-]+)/?", url)
@@ -134,7 +137,7 @@ def deezer_search_url(artist, album):
         if data["data"]:
             return data["data"][0]["link"]
     except Exception as e:
-        print(f"[WARN] Deezer search failed: {e}")
+        logger.warning(f"Deezer search failed: {e}")
     return None
 
 
@@ -160,7 +163,7 @@ def parse_plexamp_share(url: str):
             "links": {"plexamp": {"url": url}},
         }
     except Exception as e:
-        print(f"[ERROR parse_plexamp_share] {e}")
+        logger.error(f"parse_plexamp_share failed: {e}")
         return None
 
 async def extract_metadata(url: str, artist: str | None = None, album: str | None = None):
@@ -183,7 +186,7 @@ async def extract_metadata(url: str, artist: str | None = None, album: str | Non
                     if img_match:
                         cover = img_match.group(1)
             except Exception as e:
-                print(f"[WARN quietus metadata fetch] {e}")
+                logger.warning(f"Quietus metadata fetch failed: {e}")
 
         if any(domain in url for domain in ["listen.plex.tv/album", "app.plexamp.com/album"]):
             plex_data = await asyncio.to_thread(parse_plexamp_share, url)
@@ -203,7 +206,7 @@ async def extract_metadata(url: str, artist: str | None = None, album: str | Non
                             if info.get("tralbum_url"):
                                 url = info["tralbum_url"]
                         except Exception as e:
-                            print(f"[WARN daily bandcamp parse] {e}")
+                            logger.warning(f"Daily bandcamp parse failed: {e}")
                     title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html_text)
                     if title_match:
                         t = title_match.group(1)
@@ -215,7 +218,7 @@ async def extract_metadata(url: str, artist: str | None = None, album: str | Non
                         else:
                             artist = album = t
             except Exception as e:
-                print(f"[WARN fetch daily bandcamp] {e}")
+                logger.warning(f"Fetch daily bandcamp failed: {e}")
 
         # Bandcamp album pages
         if "bandcamp.com" in url:
@@ -283,7 +286,7 @@ async def extract_metadata(url: str, artist: str | None = None, album: str | Non
         }
 
     except Exception as e:
-        print(f"[ERROR] Failed to extract from {url}: {e}")
+        logger.error(f"Failed to extract from {url}: {e}")
         return {
             "artist": "Unknown",
             "album": "Unknown",

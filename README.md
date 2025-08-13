@@ -2,6 +2,16 @@
 
 A comprehensive Discord bot that downloads music from Apple Music and other streaming platforms, automatically imports it into your Plex library using beets, and provides rich music discovery features.
 
+## 🆕 Recent Improvements (v2.0)
+
+- ✅ **Centralized Configuration**: All hardcoded values moved to `config_constants.py`
+- ✅ **Improved Logging**: Standardized logging throughout the codebase
+- ✅ **Better Resource Management**: Proper cleanup of temporary files and connections
+- ✅ **Enhanced Error Handling**: Comprehensive error handling with retry mechanisms
+- ✅ **Code Organization**: Modular structure with utility functions
+- ✅ **Input Validation**: Robust validation for all user inputs
+- ✅ **Performance Optimizations**: Better async handling and resource management
+
 ## ✨ Features
 
 - **Universal Music Downloads**: Download from Apple Music, Spotify, TIDAL, and more using GAMDL
@@ -49,6 +59,8 @@ docker-compose up --build -d
 
 Create a `.env` file and configure:
 
+**New in v2.0**: All configuration values are now centralized and configurable via environment variables:
+
 ```env
 # Required
 DISCORD_TOKEN=your_discord_bot_token_here
@@ -67,6 +79,32 @@ COOKIES_PATH=/app/cookies.txt
 GAMDL_CODEC=aac-legacy
 DOWNLOAD_TIMEOUT=300
 RETRY_ATTEMPTS=3
+
+# Voice Connection Settings (Optional)
+MAX_ROOM_PARTICIPANTS=5
+VOICE_CONNECT_TIMEOUT=45
+VOICE_RETRY_ATTEMPTS=8
+VOICE_BASE_DELAY=2.0
+VOICE_MAX_DELAY=32.0
+
+# Audio Quality Settings (Optional)
+AUDIO_BITRATE_BPS=96000
+AUDIO_SAMPLE_RATE=48000
+AUDIO_CHANNELS=2
+
+# Search and Matching (Optional)
+FUZZY_MATCH_THRESHOLD=60
+MAX_SEARCH_RESULTS=10
+MAX_AUTOCOMPLETE_RESULTS=10
+
+# Scrobbling Settings (Optional)
+MIN_SCROBBLE_TIME=30
+SCROBBLE_PERCENTAGE=0.5
+
+# Channel Names (Optional)
+MUSIC_TOWN_CHANNEL=music-town
+HOT_UPDATES_CHANNEL=hot-updates
+LISTEN_LATER_PREFIX=listen-later-
 
 # Beets Web Interface (Optional)
 BEETS_WEB_ENABLED=true
@@ -136,12 +174,31 @@ Any music links posted in `#music-town` are automatically saved with reaction co
 
 ## 🏗️ Architecture
 
+### Code Structure (v2.0)
+```
+/app/
+├── bot.py                 # Main bot code
+├── config_constants.py    # Centralized configuration
+├── utils.py              # Utility functions
+├── error_handling.py     # Error handling utilities
+├── universal_scraper.py  # Metadata extraction
+├── beets-config.yaml     # Beets configuration
+├── cookies.txt           # Apple Music cookies
+└── .beets/               # Beets database
+```
+
 ### Download Process
 1. **URL Resolution**: Converts any music URL to Apple Music via Odesli API
 2. **Download**: GAMDL with fallback codec support (ALAC → AAC → etc.)
 3. **Import**: Beets organizes and tags files
 4. **Integration**: Appears in Plex library
 5. **Notification**: Discord embed with Plexamp link
+
+### Error Handling (v2.0)
+- **Retry Mechanisms**: Automatic retry with exponential backoff
+- **Resource Cleanup**: Proper cleanup of temporary files and connections
+- **Graceful Degradation**: Fallback options when primary methods fail
+- **User-Friendly Messages**: Clear error messages for users
 
 ### Beets Configuration
 **Flexible Import Modes:**
@@ -237,15 +294,22 @@ The bot automatically:
 **Downloads Fail**
 - Check cookies.txt format and expiration
 - Verify Apple Music subscription is active
+- Check logs for detailed error messages
 
 **Beets Import Errors**
 - Check file permissions on `/music` directory
 - Review beets logs: `docker logs discord-musicbot`
+- Verify import path exists and contains files
 
 **Plex Not Showing Albums**
 - Verify Plex token and URL
 - Check library scan settings
 - Albums may take 2-3 minutes to appear
+
+**Voice Connection Issues**
+- Check bot permissions in Discord
+- Verify voice channel settings
+- Use `/debug` and `/reconnect` commands
 
 **Command Sync Issues**
 - Use `/sync` command as bot owner
@@ -256,6 +320,13 @@ Enable verbose logging:
 ```bash
 docker-compose logs -f musicbot
 ```
+
+### New Debug Commands (v2.0)
+- `/debug` - Show voice connection status
+- `/reconnect` - Force reconnect to voice channel
+- `/test_plex` - Test Plex streaming URLs
+- `/test_audio` - Test audio streaming configuration
+- `/quality` - Show current audio quality settings
 
 ## 🤝 Contributing
 

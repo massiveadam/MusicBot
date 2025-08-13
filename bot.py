@@ -23,11 +23,13 @@ from io import BytesIO
 try:
     import pylast
     PYLAST_AVAILABLE = True
-    print(f"[INFO] pylast library loaded successfully: {pylast.__version__}")
+    logger = logging.getLogger(__name__)
+    logger.info(f"pylast library loaded successfully: {pylast.__version__}")
 except ImportError as e:
     PYLAST_AVAILABLE = False
     pylast = None
-    print(f"[WARNING] pylast library not available: {e}")
+    logger = logging.getLogger(__name__)
+    logger.warning(f"pylast library not available: {e}")
 from PIL import Image
 from urllib.parse import urlparse
 import re
@@ -40,8 +42,20 @@ import datetime
 import logging
 import urllib.parse
 
+# Import our new modules
+from config_constants import BotConstants
+from utils import (
+    validate_url, sanitize_filename, sanitize_query, normalize_text,
+    is_ignored_domain, create_temp_directory, cleanup_temp_directory,
+    extract_metadata_from_path, find_cover_art, count_music_files,
+    format_duration, format_file_size, truncate_text,
+    parse_discord_mention, validate_discord_id, safe_int, safe_float,
+    chunk_list, remove_duplicates_preserve_order,
+    is_valid_audio_file, is_valid_image_file
+)
 
-# Configuration management - this is a test
+
+# Configuration management
 class Config:
     """Configuration class for the Discord bot."""
     
@@ -55,10 +69,10 @@ class Config:
         self.PLEX_MACHINE_ID = None
         self.GAMDL_CODEC = os.getenv("GAMDL_CODEC", "aac-legacy")
         self.COOKIES_PATH = os.getenv("COOKIES_PATH", "/app/cookies.txt")
-        self.DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "300"))
-        self.RETRY_ATTEMPTS = int(os.getenv("RETRY_ATTEMPTS", "3"))
+        self.DOWNLOAD_TIMEOUT = BotConstants.DOWNLOAD_TIMEOUT
+        self.RETRY_ATTEMPTS = BotConstants.RETRY_ATTEMPTS
         self.HIGH_QUALITY_AUDIO = os.getenv("HIGH_QUALITY_AUDIO", "true").lower() == "true"
-        self.AUDIO_BITRATE = int(os.getenv("AUDIO_BITRATE", "96"))  # kbps for Discord streaming (matches Discord's limit)
+        self.AUDIO_BITRATE = BotConstants.AUDIO_BITRATE_BPS // 1000  # Convert to kbps
         
         # Scrobbling configuration
         self.LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
@@ -166,9 +180,12 @@ class AudioSource:
     @staticmethod
     async def prepare_apple_music_album(apple_url: str) -> List[AudioTrack]:
         """Download and prepare tracks from Apple Music."""
-        temp_dir = tempfile.mkdtemp(prefix="listening_room_")
+        temp_dir = None
         
         try:
+            # Create temporary directory with proper error handling
+            temp_dir = create_temp_directory(BotConstants.TEMP_DIR_PREFIX)
+            
             # Download the album using gamdl with high quality
             returncode, output = await run_gamdl(apple_url, output_path=temp_dir, high_quality=config.HIGH_QUALITY_AUDIO)
             if returncode != 0:
@@ -179,7 +196,7 @@ class AudioSource:
             tracks = []
             for root, dirs, files in os.walk(temp_dir):
                 for file in files:
-                    if file.lower().endswith(('.mp3', '.m4a', '.flac')):
+                    if is_valid_audio_file(file):
                         file_path = os.path.join(root, file)
                         
                         # Extract metadata from the file
@@ -188,7 +205,8 @@ class AudioSource:
                             if metadata:
                                 title = metadata.get('title', [file])[0] if isinstance(metadata.get('title'), list) else metadata.get('title', file)
                                 artist = metadata.get('artist', ['Unknown'])[0] if isinstance(metadata.get('artist'), list) else metadata.get('artist', 'Unknown')
-                                duration = int(getattr(metadata, 'length', 0))
+                                duration = safe_int(getattr(metadata, 'length', 0))
+                                
                                 # Try to read track/disc numbers
                                 track_number = None
                                 disc_number = None
@@ -196,18 +214,14 @@ class AudioSource:
                                 if isinstance(tn, list):
                                     tn = tn[0]
                                 if isinstance(tn, str):
-                                    try:
-                                        track_number = int(tn.split('/')[0])
-                                    except Exception:
-                                        pass
+                                    track_number = safe_int(tn.split('/')[0])
+                                
                                 dn = metadata.get('discnumber')
                                 if isinstance(dn, list):
                                     dn = dn[0]
                                 if isinstance(dn, str):
-                                    try:
-                                        disc_number = int(dn.split('/')[0])
-                                    except Exception:
-                                        pass
+                                    disc_number = safe_int(dn.split('/')[0])
+                                
                                 tracks.append(AudioTrack(title, artist, file_path, duration, track_number, disc_number))
                             else:
                                 # Fallback to filename
@@ -226,12 +240,11 @@ class AudioSource:
             
         except Exception as e:
             logger.error(f"Failed to prepare Apple Music album: {e}")
-            # Clean up temp directory on error
-            try:
-                shutil.rmtree(temp_dir)
-            except:
-                pass
             return []
+        finally:
+            # Clean up temp directory if we're not returning tracks (error case)
+            if temp_dir and not tracks:
+                cleanup_temp_directory(temp_dir)
 
 
 # Listening Room Classes
@@ -239,7 +252,7 @@ class ListeningRoom:
     """Represents an active listening room session."""
     
     def __init__(self, host: discord.Member, guild: discord.Guild, artist: str, album: str, source_type: str, source_data: str):
-        self.room_id = str(uuid.uuid4())[:8]  # Short ID for easy reference
+        self.room_id = str(uuid.uuid4())[:BotConstants.ROOM_ID_LENGTH]  # Short ID for easy reference
         self.host = host
         self.guild = guild
         self.artist = artist
@@ -256,7 +269,7 @@ class ListeningRoom:
         
         # Participants
         self.participants: List[discord.Member] = [host]
-        self.max_participants = 5
+        self.max_participants = BotConstants.MAX_ROOM_PARTICIPANTS
         
         # Playback state
         self.current_track = 0
@@ -341,10 +354,10 @@ class ListeningRoom:
             logger.info(f"Connecting to voice channel: {self.voice_channel.name}")
             
             # Robust connection with manual retry strategy only (disable library auto-retry)
-            max_attempts = 8
-            base_delay = 2.0
+            max_attempts = BotConstants.VOICE_RETRY_ATTEMPTS
+            base_delay = BotConstants.VOICE_BASE_DELAY
             # Small initial jitter helps avoid immediate 4006 after channel creation
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(BotConstants.VOICE_STABILIZE_DELAY)
             
             for attempt in range(1, max_attempts + 1):
                 try:
@@ -354,7 +367,7 @@ class ListeningRoom:
                     if attempt <= 4:
                         self.voice_client = await self.voice_channel.connect(
                             reconnect=False,
-                            timeout=45.0,
+                            timeout=BotConstants.VOICE_CONNECT_TIMEOUT,
                             self_deaf=True
                         )
                     else:
@@ -370,7 +383,7 @@ class ListeningRoom:
                         await asyncio.sleep(0.5 * attempt)
                         self.voice_client = await self.voice_channel.connect(
                             reconnect=False,
-                            timeout=60.0,
+                            timeout=BotConstants.VOICE_CONNECT_TIMEOUT * 1.5,  # Longer timeout for retry attempts
                             self_deaf=True
                         )
                     
@@ -421,7 +434,7 @@ class ListeningRoom:
                             except Exception:
                                 pass
                             self.voice_client = None
-                        delay = min(32.0, base_delay * (2 ** (attempt - 1)))
+                        delay = min(BotConstants.VOICE_MAX_DELAY, base_delay * (2 ** (attempt - 1)))
                         logger.info(f"Waiting {delay}s before retry...")
                         await asyncio.sleep(delay)
                         continue
@@ -516,14 +529,14 @@ class ListeningRoom:
             # Create FFmpeg audio source with simplified, proven options
             # Based on research of working Discord music bots
             ffmpeg_options = {
-                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 5 -rw_timeout 5000000',
-                'options': '-vn -probesize 256k -analyzeduration 1M -use_wallclock_as_timestamps 1 -af aresample=async=1:min_hard_comp=0.100:first_pts=0'
+                'before_options': BotConstants.FFMPEG_BEFORE_OPTIONS,
+                'options': BotConstants.FFMPEG_OPTIONS
             }
             
             # Alternative options if the simple approach fails
             alternative_options = {
-                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 5 -rw_timeout 5000000',
-                'options': '-vn -acodec libopus -ar 48000 -ac 2 -b:a 96k -vbr constrained -compression_level 10 -application audio -frame_duration 60 -probesize 256k -analyzeduration 1M -use_wallclock_as_timestamps 1 -af aresample=async=1:min_hard_comp=0.100:first_pts=0'
+                'before_options': BotConstants.FFMPEG_BEFORE_OPTIONS,
+                'options': BotConstants.FFMPEG_OPUS_OPTIONS
             }
             
             if track.file_path.startswith("http"):
@@ -741,10 +754,10 @@ class ListeningRoom:
                 return
             # Scrobble the completed track for all participants
             if self.current_track_info:
-                # Check if track played for at least 30 seconds or half its duration (Last.fm requirement)
+                # Check if track played for at least minimum time or half its duration (Last.fm requirement)
                 play_duration = time.time() - self.start_time if hasattr(self, 'start_time') else 0
                 track_duration = self.current_track_info.duration or 240  # Default 4 minutes if unknown
-                min_scrobble_time = min(30, track_duration / 2)
+                min_scrobble_time = min(BotConstants.MIN_SCROBBLE_TIME, track_duration * BotConstants.SCROBBLE_PERCENTAGE)
                 
                 if play_duration >= min_scrobble_time:
                     scrobbled_users = await scrobble_manager.scrobble_for_room_participants(self, self.current_track_info)
@@ -1414,7 +1427,7 @@ async def fetch_apple_url(odesli_url):
     async with aiohttp.ClientSession() as session:
         async with session.get(api_url) as resp:
             if resp.status != 200:
-                print(f"[WARN fetch_apple_url] Request failed: {resp.status}")
+                logger.warning(f"fetch_apple_url request failed: {resp.status}")
                 return None
             data = await resp.json()
             return data.get("linksByPlatform", {}).get("appleMusic", {}).get("url")
@@ -1598,7 +1611,7 @@ async def download_album(interaction, url):
         await interaction.channel.send(f"✅ **{artist} - {album}** downloaded and imported successfully!")
 
     # Mirror to #music-town if needed
-    music_town = discord.utils.get(interaction.guild.text_channels, name="music-town")
+    music_town = discord.utils.get(interaction.guild.text_channels, name=BotConstants.MUSIC_TOWN_CHANNEL)
     if music_town and music_town.permissions_for(interaction.guild.me).send_messages:
         await music_town.send(embed=embed, view=view)
 
@@ -1735,7 +1748,7 @@ async def get_plex_album_guid(artist: str, album: str) -> str | None:
         return None
 
     except Exception as e:
-        print("[WARN get_plex_album_guid]", e)
+        logger.warning(f"get_plex_album_guid failed: {e}")
         return None
 
 
@@ -1793,7 +1806,7 @@ async def build_album_embed(url: str, plex_url: str = None):
     if cover and cover.startswith("http"):
         embed.set_thumbnail(url=cover)
 
-    print(f"[DEBUG] Embed created: {artist} - {album}, source: {source_name}")
+    logger.debug(f"Embed created: {artist} - {album}, source: {source_name}")
     return embed, view, artist, album, links
 
 
@@ -1827,7 +1840,7 @@ async def fetch_aoty_trending(limit: int = 5):
             })
         return albums
     except Exception as e:
-        print("[WARN fetch_aoty_trending]", e)
+        logger.warning(f"fetch_aoty_trending failed: {e}")
         return []
 
 
@@ -1864,7 +1877,7 @@ async def fetch_bandcamp_aotd(limit: int = 1):
                 break
         return albums
     except Exception as e:
-        print("[WARN fetch_bandcamp_aotd]", e)
+        logger.warning(f"fetch_bandcamp_aotd failed: {e}")
         return []
 
 
@@ -1916,7 +1929,7 @@ async def fetch_quietus_aotw(limit: int = 5):
                 break
         return albums
     except Exception as e:
-        print("[WARN fetch_quietus_aotw]", e)
+        logger.warning(f"fetch_quietus_aotw failed: {e}")
         return []
 
 
@@ -1955,7 +1968,7 @@ async def fetch_pitchfork_best_new(limit: int = 5):
                     break
         return albums
     except Exception as e:
-        print("[WARN fetch_pitchfork_best_new]", e)
+        logger.warning(f"fetch_pitchfork_best_new failed: {e}")
         return []
 
 
@@ -2002,7 +2015,7 @@ async def fetch_brooklynvegan_notable(limit: int = 10):
 
         return albums
     except Exception as e:
-        print("[WARN fetch_brooklynvegan_notable]", e)
+        logger.warning(f"fetch_brooklynvegan_notable failed: {e}")
         return []
 
 
@@ -2016,7 +2029,7 @@ async def create_collage(urls: list[str], cell_size: int = 100, columns: int = 3
                 if resp.status == 200:
                     return BytesIO(await resp.read())
         except Exception as e:
-            print("[WARN create_collage fetch]", e)
+            logger.warning(f"create_collage fetch failed: {e}")
         return None
 
     async with aiohttp.ClientSession() as session:
@@ -2029,7 +2042,7 @@ async def create_collage(urls: list[str], cell_size: int = 100, columns: int = 3
                 img = Image.open(data).convert("RGB")
                 images.append(img)
             except Exception as e:
-                print("[WARN create_collage open]", e)
+                logger.warning(f"create_collage open failed: {e}")
 
     if not images:
         return None
@@ -2062,7 +2075,7 @@ async def on_raw_reaction_add(payload):
     try:
         message = await channel.fetch_message(payload.message_id)
     except Exception as e:
-        print(f"[ERROR] Could not fetch message: {e}")
+        logger.error(f"Could not fetch message: {e}")
         return
 
     emoji = str(payload.emoji)
@@ -2075,7 +2088,7 @@ async def on_raw_reaction_add(payload):
     try:
         fake_interaction = FakeInteraction(message=message, user=member)
     except Exception as e:
-        print(f"[ERROR] Failed to create FakeInteraction: {e}")
+        logger.error(f"Failed to create FakeInteraction: {e}")
         return
 
     if emoji == "📥":
@@ -2095,14 +2108,14 @@ async def on_raw_reaction_add(payload):
 async def on_ready():
     try:
         bot.tree.clear_commands(guild=config.DEV_GUILD)
-        print("[INFO] Cleared existing guild commands")
+        logger.info("Cleared existing guild commands")
         bot.tree.copy_global_to(guild=config.DEV_GUILD)
         await bot.tree.sync(guild=config.DEV_GUILD)
-        print(f"[INFO] Synced commands to dev guild {config.DEV_GUILD_ID}")
+        logger.info(f"Synced commands to dev guild {config.DEV_GUILD_ID}")
     except Exception as e:
-        print(f"[WARN] Failed to sync commands: {e}")
-    print(f"[INFO] Logged in as {bot.user}")
-    print(f"[INFO] Using music folder: {config.MUSIC_FOLDER}")
+        logger.warning(f"Failed to sync commands: {e}")
+    logger.info(f"Logged in as {bot.user}")
+    logger.info(f"Using music folder: {config.MUSIC_FOLDER}")
 
     if config.PLEX_TOKEN and config.PLEX_URL:
         try:
@@ -2113,9 +2126,9 @@ async def on_ready():
                         match = re.search(r'machineIdentifier="([^"]+)"', xml)
                         if match:
                             config.PLEX_MACHINE_ID = match.group(1)
-                            print(f"[INFO] Found Plex machine ID: {config.PLEX_MACHINE_ID}")
+                            logger.info(f"Found Plex machine ID: {config.PLEX_MACHINE_ID}")
         except Exception as e:
-            print(f"[WARN] Could not fetch Plex machine ID: {e}")
+            logger.warning(f"Could not fetch Plex machine ID: {e}")
 
     if not scheduled_hotupdates.is_running():
         scheduled_hotupdates.start()
@@ -2161,7 +2174,7 @@ async def save(interaction: discord.Interaction, url: str):
     try:
         await handle_save_logic(interaction, url)
     except Exception as e:
-        print("[ERROR] /save failed:", e)
+        logger.error(f"/save failed: {e}")
         if not is_fake:
             try:
                 await interaction.followup.send("❌ Failed to save the album.")
@@ -2176,7 +2189,7 @@ async def save(interaction: discord.Interaction, url: str):
             await asyncio.sleep(2)
             await interaction.delete_original_response()
         except Exception as e:
-            print("[WARN] Could not clean up original response:", e)
+            logger.warning(f"Could not clean up original response: {e}")
 
 
 @bot.tree.command(name="library", description="Search your Plex library for albums by artist or album name")
@@ -2248,7 +2261,7 @@ async def library(interaction: discord.Interaction, query: str):
             await interaction.followup.send(embed=embed, view=view)
 
     except Exception as e:
-        print("[ERROR /library]", e)
+        logger.error(f"/library failed: {e}")
         await interaction.followup.send("❌ Error occurred while searching your Plex library.")
 
 
@@ -2318,13 +2331,13 @@ class RecommendDropdown(discord.ui.View):
         self.url = url
         self.message = None  # Will hold the prompt message so we can delete it
 
-        music_town = discord.utils.get(guild.text_channels, name="music-town")
+        music_town = discord.utils.get(guild.text_channels, name=BotConstants.MUSIC_TOWN_CHANNEL)
         members = []
 
         if music_town:
             for member in guild.members:
                 perms = music_town.permissions_for(member)
-                print(f"[DEBUG] Member: {member.display_name}, Bot: {member.bot}, CanRead: {perms.read_messages}")
+                logger.debug(f"Member: {member.display_name}, Bot: {member.bot}, CanRead: {perms.read_messages}")
                 if not member.bot and perms.read_messages:
                     members.append(member)
 
@@ -2344,7 +2357,7 @@ class RecommendDropdown(discord.ui.View):
             self.select.callback = self.select_callback
             self.add_item(self.select)
         else:
-            print("[WARN] RecommendDropdown: No valid members found.")
+            logger.warning("RecommendDropdown: No valid members found.")
 
     async def select_callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.author_id:
@@ -2359,7 +2372,7 @@ class RecommendDropdown(discord.ui.View):
             if not user:
                 continue
 
-            rec_channel_name = f"listen-later-{user.name.lower().replace(' ', '-')}"
+            rec_channel_name = f"{BotConstants.LISTEN_LATER_PREFIX}{user.name.lower().replace(' ', '-')}"
             rec_channel = discord.utils.get(self.guild.text_channels, name=rec_channel_name)
 
             if not rec_channel:
@@ -2404,7 +2417,7 @@ class RecommendDropdown(discord.ui.View):
                     f"✅ Recommended to {', '.join(confirmed_mentions)}", ephemeral=True
                 )
             except discord.errors.NotFound:
-                print("[WARN] RecommendDropdown interaction expired — skipping confirmation message.")
+                logger.warning("RecommendDropdown interaction expired — skipping confirmation message.")
         else:
             await interaction.response.send_message("❌ No valid users were selected.", ephemeral=True)
 
@@ -2413,12 +2426,12 @@ class RecommendDropdown(discord.ui.View):
             if self.message:
                 await self.message.delete()
         except Exception as e:
-            print("[WARN] Could not delete recommend prompt:", e)
+            logger.warning(f"Could not delete recommend prompt: {e}")
 
         try:
             await interaction.message.edit(content="✅ Recommendation sent.", view=None)
         except Exception as e:
-            print("[WARN] Could not clear dropdown view:", e)
+            logger.warning(f"Could not clear dropdown view: {e}")
 
         self.stop()
 
@@ -2443,7 +2456,7 @@ class FakeInteraction:
             msg = await self.channel.send(content=content, embed=embed, file=file, view=view)
             return msg
         except Exception as e:
-            print("[WARN FakeInteraction.send failed]:", e)
+            logger.warning(f"FakeInteraction.send failed: {e}")
 
     @property
     def response(self):
@@ -2456,7 +2469,7 @@ class FakeInteraction:
 
 async def post_album_message(channel, embed, url, user_id, artist, album, links=None, view=None, extra_reactions=None, file=None):
     try:
-        print(f"[DEBUG] Sending embed to #{channel.name}: {embed.title}")
+        logger.debug(f"Sending embed to #{channel.name}: {embed.title}")
         msg = await channel.send(embed=embed, view=view, file=file)
 
         # Save for future reference
@@ -2470,7 +2483,7 @@ async def post_album_message(channel, embed, url, user_id, artist, album, links=
         return msg
 
     except Exception as e:
-        print(f"[ERROR] post_album_message failed in #{channel.name}: {e}")
+        logger.error(f"post_album_message failed in #{channel.name}: {e}")
         return None
 
     
@@ -2479,7 +2492,7 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    if message.channel.name != "music-town":
+    if message.channel.name != BotConstants.MUSIC_TOWN_CHANNEL:
         return
 
     url_match = re.search(r"(https?://\S+)", message.content)
@@ -2487,26 +2500,22 @@ async def on_message(message):
         return
 
     url = url_match.group(1)
-    print(f"[AUTO-SAVE] Detected link: {url}")
+    logger.info(f"[AUTO-SAVE] Detected link: {url}")
 
     # 🚫 Skip non-music domains
-    ignored_domains = [
-        "tenor.com", "giphy.com", "imgur.com", "youtube.com", "youtu.be",
-        "twitter.com", "x.com", "reddit.com", "tiktok.com"
-    ]
-    if any(domain in url for domain in ignored_domains):
-        print("[AUTO-SAVE] Skipping non-music-related link.")
+    if is_ignored_domain(url):
+        logger.info("[AUTO-SAVE] Skipping non-music-related link.")
         return
 
     fake_interaction = FakeInteraction(message=message, user=message.author)
 
     try:
-        print("[AUTO-SAVE] Calling handle_save_logic...")
+        logger.info("[AUTO-SAVE] Calling handle_save_logic...")
         await handle_save_logic(fake_interaction, url, mirror_only=True)
-        print("[AUTO-SAVE] handle_save_logic completed.")
+        logger.info("[AUTO-SAVE] handle_save_logic completed.")
         await message.delete()  # Optional
     except Exception as e:
-        print(f"[AUTO-SAVE ERROR]: {type(e).__name__}: {e}")
+        logger.error(f"[AUTO-SAVE ERROR]: {type(e).__name__}: {e}")
 
 
 async def handle_save_logic(interaction, url: str, mirror_only=False):
@@ -2535,7 +2544,7 @@ async def handle_save_logic(interaction, url: str, mirror_only=False):
 
         if mirror_only:
             # === Auto-save or 📌 reaction → post to #music-town ===
-            music_town = discord.utils.get(guild.text_channels, name="music-town")
+            music_town = discord.utils.get(guild.text_channels, name=BotConstants.MUSIC_TOWN_CHANNEL)
             if music_town:
                 reactions = []
                 if download_available:
@@ -2545,7 +2554,7 @@ async def handle_save_logic(interaction, url: str, mirror_only=False):
 
         else:
             # === /save or manual 📌 → post to user's private listen-later channel ===
-            channel_name = f"listen-later-{user.name.lower().replace(' ', '-')}"
+            channel_name = f"{BotConstants.LISTEN_LATER_PREFIX}{user.name.lower().replace(' ', '-')}"
 
             private = discord.utils.get(guild.text_channels, name=channel_name)
             if not private:
@@ -2555,7 +2564,7 @@ async def handle_save_logic(interaction, url: str, mirror_only=False):
                     guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
                 }
                 private = await guild.create_text_channel(channel_name, overwrites=overwrites)
-                print(f"[INFO] Created new channel: {channel_name}")
+                logger.info(f"Created new channel: {channel_name}")
 
             reactions = []
             if download_available:
@@ -2564,7 +2573,7 @@ async def handle_save_logic(interaction, url: str, mirror_only=False):
             await post_album_message(private, embed, url, user.id, artist, album, links=links, view=view, extra_reactions=reactions)
 
     except Exception as e:
-        print("[ERROR] handle_save_logic failed:", e)
+        logger.error(f"handle_save_logic failed: {e}")
         try:
             await interaction.followup.send("❌ Failed to save the album.", ephemeral=True)
         except:
@@ -2595,7 +2604,7 @@ async def post_hotupdates(channel: discord.TextChannel) -> bool:
             if meta.get("cover_url"):
                 album["cover"] = meta["cover_url"]
         except Exception as e:
-            print("[WARN hotupdates links]", e)
+            logger.warning(f"hotupdates links failed: {e}")
             album["links"] = {}
 
     sources = [
@@ -2651,7 +2660,7 @@ async def post_hotupdates(channel: discord.TextChannel) -> bool:
 async def hotupdates(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True, ephemeral=True)
 
-    channel = discord.utils.get(interaction.guild.text_channels, name="hot-updates")
+    channel = discord.utils.get(interaction.guild.text_channels, name=BotConstants.HOT_UPDATES_CHANNEL)
     if not channel:
         await interaction.followup.send("❌ Channel #hot-updates not found.", ephemeral=True)
         return
@@ -2756,13 +2765,13 @@ async def resync_commands(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ Failed to resync commands: {e}", ephemeral=True)
 
 
-@tasks.loop(time=datetime.time(hour=17, minute=30))
+@tasks.loop(time=datetime.time(hour=BotConstants.HOT_UPDATES_HOUR, minute=BotConstants.HOT_UPDATES_MINUTE))
 async def scheduled_hotupdates():
     now = datetime.datetime.now()
-    if now.weekday() in (2, 4):  # Wednesday and Friday
+    if now.weekday() in BotConstants.HOT_UPDATES_DAYS:  # Wednesday and Friday
         guild = bot.get_guild(config.DEV_GUILD_ID)
         if guild:
-            channel = discord.utils.get(guild.text_channels, name="hot-updates")
+            channel = discord.utils.get(guild.text_channels, name=BotConstants.HOT_UPDATES_CHANNEL)
             if channel:
                 await post_hotupdates(channel)
 
@@ -2784,7 +2793,7 @@ async def album_autocomplete(interaction: discord.Interaction, current: str) -> 
         search_url = f"{config.PLEX_URL}/library/search?query={sanitize_query(current)}"
         
         async with aiohttp.ClientSession() as session:
-            async with session.get(search_url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as response:
+            async with session.get(search_url, headers=headers, timeout=aiohttp.ClientTimeout(total=BotConstants.PLEX_SEARCH_TIMEOUT)) as response:
                 if response.status != 200:
                     return []
                 xml = await response.text()
@@ -2803,9 +2812,9 @@ async def album_autocomplete(interaction: discord.Interaction, current: str) -> 
             if len(combined) <= 100:  # Discord choice limit
                 albums.append(app_commands.Choice(name=combined, value=combined))
         
-        # Sort by relevance and return top 10
+        # Sort by relevance and return top results
         albums.sort(key=lambda x: fuzz.ratio(current.lower(), x.name.lower()), reverse=True)
-        return albums[:10]
+        return albums[:BotConstants.MAX_AUTOCOMPLETE_RESULTS]
         
     except Exception as e:
         logger.warning(f"Autocomplete error: {e}")
@@ -2911,7 +2920,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 logger.info(f"Search '{search_query}' found {len(albums)} albums, best match: {best_album['artist']} - {best_album['title']} (score: {best_album['score']})")
                 
                 # If the best match is still pretty bad, show some options
-                if best_album['score'] < 60 and len(albums) > 1:
+                if best_album['score'] < BotConstants.FUZZY_MATCH_THRESHOLD and len(albums) > 1:
                     # Show top 3 matches for user to choose from
                     options_text = "🔍 **Found multiple matches:**\n"
                     for i, album_data in enumerate(albums[:3]):
@@ -3025,8 +3034,8 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 )
             }
             
-            # Determine an appropriate bitrate (Discord caps depend on server boost). We'll request 96 kbps.
-            bitrate_bps = 96_000
+            # Determine an appropriate bitrate (Discord caps depend on server boost)
+            bitrate_bps = BotConstants.AUDIO_BITRATE_BPS
             room.voice_channel = await interaction.guild.create_voice_channel(
                 name=voice_channel_name,
                 category=room.category,  # Use the created category
@@ -3869,9 +3878,9 @@ async def search_albums(interaction: discord.Interaction, query: str):
             await interaction.followup.send(f"❌ No albums found for '{query}' in your library.")
             return
         
-        # Sort by relevance and show top 10
+        # Sort by relevance and show top results
         albums.sort(key=lambda x: x["score"], reverse=True)
-        top_albums = albums[:10]
+        top_albums = albums[:BotConstants.MAX_SEARCH_RESULTS]
         
         embed = discord.Embed(
             title="🔍 Album Search Results",
@@ -3916,7 +3925,7 @@ async def mark_as_listened(interaction, message):
         await message.edit(embed=new_embed)
         
     except Exception as e:
-        print(f"[ERROR] mark_as_listened failed: {e}")
+        logger.error(f"mark_as_listened failed: {e}")
 
 
 async def recommend_album(interaction, message):
@@ -3937,7 +3946,7 @@ async def recommend_album(interaction, message):
         dropdown.message = prompt_msg
         
     except Exception as e:
-        print(f"[ERROR] recommend_album failed: {e}")
+        logger.error(f"recommend_album failed: {e}")
 
 
 # Scrobbling Commands
