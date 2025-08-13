@@ -70,6 +70,10 @@ RETRY_ATTEMPTS=3
 
 # Beets Web Interface (Optional)
 BEETS_WEB_ENABLED=true
+
+# Last.fm Scrobbling (Optional)
+LASTFM_API_KEY=your_lastfm_api_key_here
+LASTFM_API_SECRET=your_lastfm_api_secret_here
 ```
 
 ### Apple Music Cookies

@@ -265,8 +265,10 @@ class ListeningRoom:
         self.is_paused = False
         self.start_time = None
         self.pause_time = None
+        self._skipping = False  # Debounce flag for skip operations
+        self._manual_stop_flag = False  # Flag to prevent auto-advance after manual stop
         self.temp_dir = None  # For Apple Music downloads
-        self._manual_stop_flag = False  # Prevent auto-advance on manual stop
+        self._connect_lock = asyncio.Lock()  # Lock for connection synchronization
         
         # Created timestamp
         self.created_at = time.time()
@@ -1027,6 +1029,7 @@ class ListeningRoomManager:
     def __init__(self):
         self.rooms: Dict[str, ListeningRoom] = {}  # room_id -> ListeningRoom
         self.user_rooms: Dict[int, str] = {}  # user_id -> room_id
+        self._global_voice_lock = asyncio.Lock()  # Serialize voice connections globally
         
     async def create_room(self, host: discord.Member, guild: discord.Guild, artist: str, album: str, source_type: str, source_data: str) -> ListeningRoom:
         """Create a new listening room."""
