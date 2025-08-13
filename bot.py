@@ -12,6 +12,7 @@ import tempfile
 import shutil
 import hashlib
 import json
+import logging
 
 import subprocess
 import requests
@@ -20,6 +21,17 @@ from universal_scraper import extract_metadata  # async for /ripurl and /save
 from colorthief import ColorThief
 from bs4 import BeautifulSoup
 from io import BytesIO
+from PIL import Image
+from urllib.parse import urlparse
+import re
+import xml.etree.ElementTree as ET
+import unicodedata
+from fuzzywuzzy import fuzz
+import math
+import html
+import datetime
+import urllib.parse
+
 try:
     import pylast
     PYLAST_AVAILABLE = True
@@ -30,17 +42,6 @@ except ImportError as e:
     pylast = None
     logger = logging.getLogger(__name__)
     logger.warning(f"pylast library not available: {e}")
-from PIL import Image
-from urllib.parse import urlparse
-import re
-import xml.etree.ElementTree as ET
-import unicodedata
-from fuzzywuzzy import fuzz
-import math
-import html
-import datetime
-import logging
-import urllib.parse
 
 # Import our new modules
 from config_constants import BotConstants
