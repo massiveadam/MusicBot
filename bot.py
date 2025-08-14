@@ -1236,7 +1236,7 @@ class PlaybackControlView(discord.ui.View):
             
             # Announce the action
             if room.text_channel:
-        await room.text_channel.send(f"{emoji} **{interaction.user.display_name}** {action} the music", allowed_mentions=discord.AllowedMentions.none())
+                await room.text_channel.send(f"{emoji} **{interaction.user.display_name}** {action} the music", allowed_mentions=discord.AllowedMentions.none())
                 
         except Exception as e:
             logger.error(f"Play/pause error: {e}")
@@ -1264,7 +1264,7 @@ class PlaybackControlView(discord.ui.View):
             
             if success and room.text_channel:
                 track = room.current_track_info
-        await room.text_channel.send(f"⏮️ **{interaction.user.display_name}** skipped to previous track: **{track}**", allowed_mentions=discord.AllowedMentions.none())
+                await room.text_channel.send(f"⏮️ **{interaction.user.display_name}** skipped to previous track: **{track}**", allowed_mentions=discord.AllowedMentions.none())
             
         except Exception as e:
             logger.error(f"Previous track error: {e}")
@@ -1292,7 +1292,7 @@ class PlaybackControlView(discord.ui.View):
             
             if success and room.text_channel:
                 track = room.current_track_info
-        await room.text_channel.send(f"⏭️ **{interaction.user.display_name}** skipped to next track: **{track}**", allowed_mentions=discord.AllowedMentions.none())
+                await room.text_channel.send(f"⏭️ **{interaction.user.display_name}** skipped to next track: **{track}**", allowed_mentions=discord.AllowedMentions.none())
             
         except Exception as e:
             logger.error(f"Next track error: {e}")
@@ -1315,7 +1315,7 @@ class PlaybackControlView(discord.ui.View):
             await interaction.response.edit_message(view=self)
             
             if room.text_channel:
-        await room.text_channel.send(f"⏹️ **{interaction.user.display_name}** stopped the music", allowed_mentions=discord.AllowedMentions.none())
+                await room.text_channel.send(f"⏹️ **{interaction.user.display_name}** stopped the music", allowed_mentions=discord.AllowedMentions.none())
             
         except Exception as e:
             logger.error(f"Stop playback error: {e}")
