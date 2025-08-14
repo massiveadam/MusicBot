@@ -734,7 +734,7 @@ class ListeningRoom:
                 success = await self.play_current_track()
                 if success and self.text_channel:
                     track = self.current_track_info
-                    await self.text_channel.send(f"⏭️ Skipped to next track: **{track}**")
+                    await self.text_channel.send(f"⏭️ Skipped to next track: **{track}**", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
                 return success
             else:
                 logger.info("Already at the last track")
@@ -756,7 +756,7 @@ class ListeningRoom:
                 success = await self.play_current_track()
                 if success and self.text_channel:
                     track = self.current_track_info
-                    await self.text_channel.send(f"⏮️ Skipped to previous track: **{track}**")
+                    await self.text_channel.send(f"⏮️ Skipped to previous track: **{track}**", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
                 return success
             else:
                 logger.info("Already at the first track")
@@ -783,7 +783,7 @@ class ListeningRoom:
                 if play_duration >= min_scrobble_time:
                     scrobbled_users = await scrobble_manager.scrobble_for_room_participants(self, self.current_track_info)
                     if scrobbled_users and self.text_channel:
-                        await self.text_channel.send(f"🎵 Scrobbled to Last.fm for: {', '.join(scrobbled_users)}")
+                        await self.text_channel.send(f"🎵 Scrobbled to Last.fm for: {', '.join(scrobbled_users)}", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
                 else:
                     if self.text_channel:
                         remaining = int(min_scrobble_time - play_duration)
@@ -797,7 +797,7 @@ class ListeningRoom:
             # End of album
             self.is_playing = False
             if self.text_channel:
-                await self.text_channel.send("🎵 **Album finished!** Thanks for listening together! 🎉")
+                await self.text_channel.send("🎵 **Album finished!** Thanks for listening together! 🎉", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
                 # Update the UI to show stopped state
                 await self._update_ui()
     
@@ -1141,7 +1141,7 @@ class ListeningRoomManager:
             try:
                 if room.text_channel:
                     # Send farewell message before deleting (silent to avoid notifications)
-                    await room.text_channel.send("🎵 **Listening room ended.** Thanks for listening together! 👋")
+                    await room.text_channel.send("🎵 **Listening room ended.** Thanks for listening together! 👋", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
                     await asyncio.sleep(2)  # Give people time to see the message
                     await room.text_channel.delete(reason="Listening room ended")
                     logger.info(f"Deleted text channel for room {room_id}")
@@ -1236,7 +1236,7 @@ class PlaybackControlView(discord.ui.View):
             
             # Announce the action
             if room.text_channel:
-                await room.text_channel.send(f"{emoji} **{interaction.user.display_name}** {action} the music")
+                await room.text_channel.send(f"{emoji} **{interaction.user.display_name}** {action} the music", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
                 
         except Exception as e:
             logger.error(f"Play/pause error: {e}")
@@ -1264,7 +1264,7 @@ class PlaybackControlView(discord.ui.View):
             
             if success and room.text_channel:
                 track = room.current_track_info
-                await room.text_channel.send(f"⏮️ **{interaction.user.display_name}** skipped to previous track: **{track}**")
+                await room.text_channel.send(f"⏮️ **{interaction.user.display_name}** skipped to previous track: **{track}**", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
             
         except Exception as e:
             logger.error(f"Previous track error: {e}")
@@ -1292,7 +1292,7 @@ class PlaybackControlView(discord.ui.View):
             
             if success and room.text_channel:
                 track = room.current_track_info
-                await room.text_channel.send(f"⏭️ **{interaction.user.display_name}** skipped to next track: **{track}**")
+                await room.text_channel.send(f"⏭️ **{interaction.user.display_name}** skipped to next track: **{track}**", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
             
         except Exception as e:
             logger.error(f"Next track error: {e}")
@@ -1315,7 +1315,7 @@ class PlaybackControlView(discord.ui.View):
             await interaction.response.edit_message(view=self)
             
             if room.text_channel:
-                await room.text_channel.send(f"⏹️ **{interaction.user.display_name}** stopped the music")
+                await room.text_channel.send(f"⏹️ **{interaction.user.display_name}** stopped the music", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
             
         except Exception as e:
             logger.error(f"Stop playback error: {e}")
@@ -3164,16 +3164,17 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             # Public mode: everyone can see, but no pings/notifications
             await interaction.followup.send(embed=embed, view=view)
         
-        # Send initial message to the text channel (silent to avoid notifications)
+        # Send initial message to the text channel (with notification suppression)
         welcome_msg = f"🎵 **Welcome to the listening room for {artist} - {album}!**\n\n"
         welcome_msg += f"• Join the voice channel: {room.voice_channel.mention}\n"
         welcome_msg += f"• Anyone can control the music using the buttons below\n"
         welcome_msg += f"• Room ID: `{room.room_id}`"
         
-        await room.text_channel.send(welcome_msg)
+        # Use message flags to suppress notifications
+        await room.text_channel.send(welcome_msg, flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
         
         # Load tracks and start audio setup
-        loading_msg = await room.text_channel.send("📀 Loading tracks...")
+        loading_msg = await room.text_channel.send("📀 Loading tracks...", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
         
         # Load album tracks
         tracks_loaded = await room.load_tracks()
@@ -3236,11 +3237,11 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 embed=updated_embed,
                 view=playback_controls
             )
-            await room.text_channel.send(f"🎵 Auto-started playback! **{room.current_track_info}**")
+            await room.text_channel.send(f"🎵 Auto-started playback! **{room.current_track_info}**", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
         else:
             logger.error(f"Failed to auto-start playback after 3 attempts in room {room.room_id}")
-            await room.text_channel.send("⚠️ Tracks loaded but auto-start failed. Use the ▶️ button to start manually.")
-            await room.text_channel.send("💡 **Tip:** Try `/debug` and `/reconnect` if you have issues.")
+            await room.text_channel.send("⚠️ Tracks loaded but auto-start failed. Use the ▶️ button to start manually.", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
+            await room.text_channel.send("💡 **Tip:** Try `/debug` and `/reconnect` if you have issues.", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
         
         logger.info(f"Successfully created listening room {room.room_id} for {artist} - {album}")
         
@@ -3282,7 +3283,7 @@ async def join_room_command(interaction: discord.Interaction, room_id: str):
     
     # Announce in the text channel
     if room.text_channel:
-        await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})")
+        await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
 
 
 @bot.tree.command(name="leave", description="Leave your current listening room")
@@ -3394,7 +3395,7 @@ async def on_interaction(interaction: discord.Interaction):
         
         # Announce in the text channel
         if room.text_channel:
-            await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})")
+            await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})", flags=discord.MessageFlags.SUPPRESS_NOTIFICATIONS)
 
 
 # ==================== PLAYBACK CONTROL COMMANDS ====================
