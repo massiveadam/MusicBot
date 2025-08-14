@@ -52,8 +52,11 @@ Your bot needs these permissions at the **server level** (in Server Settings > I
 - **Fix**: Enable `Manage Channels` in bot permissions
 
 ### Error 50013: Missing Permissions
-- **Cause**: Bot role is below the target channel's role in hierarchy
-- **Fix**: Move bot role higher in the role hierarchy
+- **Cause**: Bot role is below the target channel's role in hierarchy OR bot lacks specific permissions
+- **Fix**: 
+  1. **Move bot role higher in hierarchy**: Go to Server Settings > Roles and drag your bot's role above any channels it needs to manage
+  2. **Check bot permissions**: Ensure bot has all required permissions listed above
+  3. **Check category permissions**: If creating channels in a specific category, ensure bot has permissions in that category
 
 ### Error 50001: Missing Access (Channel Creation)
 - **Cause**: Bot can't create channels in the target category
@@ -78,6 +81,46 @@ If successful, you should see:
 2. **Check role hierarchy** - bot role must be above channels it manages
 3. **Verify bot is in the server** - check member list
 4. **Check audit logs** - look for permission-related entries
+
+## Specific Fix for Error 50013:
+
+If you're getting `403 Forbidden (error code: 50013): Missing Permissions`:
+
+### Step 1: Check Role Hierarchy
+1. Go to **Server Settings** → **Roles**
+2. Find your bot's role in the list
+3. **Drag the bot's role higher** in the list (above any channels it needs to manage)
+4. The bot role should be above the `@everyone` role and any other roles that might interfere
+
+### Step 2: Verify Bot Permissions
+1. Go to **Server Settings** → **Integrations** → **Bots and Apps**
+2. Click on your bot
+3. Ensure these permissions are **enabled**:
+   - ✅ Manage Channels
+   - ✅ Manage Permissions
+   - ✅ Connect
+   - ✅ Speak
+   - ✅ Use Voice Activity
+   - ✅ Send Messages
+   - ✅ View Channels
+   - ✅ Add Reactions
+
+### Step 3: Check Category Permissions (if applicable)
+If your bot is trying to create channels in a specific category:
+1. Right-click the category → **Edit Category**
+2. Go to **Permissions** tab
+3. Ensure your bot's role has these permissions:
+   - ✅ Manage Channels
+   - ✅ Manage Permissions
+   - ✅ View Channel
+   - ✅ Connect
+   - ✅ Speak
+
+### Step 4: Test Again
+After making these changes:
+1. Restart your bot
+2. Try the `/golive` command again
+3. Check the logs for any remaining errors
 
 ## Current Bot Permissions in Code:
 
