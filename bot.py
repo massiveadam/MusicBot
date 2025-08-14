@@ -3002,7 +3002,6 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     connect=True,  # Can join voice channels
                     speak=False,  # Users start muted but can unmute themselves
                     use_voice_activation=True,  # Enable voice activation
-                    view_channel=True,  # Can see the category
                     send_messages=True,  # Can send messages
                     add_reactions=True,  # Can react to messages
                     # Mute notifications for everyone by default
@@ -3014,7 +3013,6 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     connect=True,
                     speak=True,  # Room creator can always speak
                     use_voice_activation=True,
-                    view_channel=True,
                     send_messages=True,
                     add_reactions=True,
                     mention_everyone=True,  # Can mention @everyone
@@ -3026,7 +3024,6 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     speak=True,
                     manage_channels=True,
                     send_messages=True,
-                    view_channel=True,
                     mention_everyone=True,
                 )
             }
