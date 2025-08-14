@@ -3074,8 +3074,14 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         except Exception as e:
             logger.error(f"Failed to create category: {e}")
             logger.error(f"Bot permissions: {interaction.guild.me.guild_permissions}")
+            logger.error(f"Has Manage Channels: {interaction.guild.me.guild_permissions.manage_channels}")
+            logger.error(f"Has Manage Permissions: {interaction.guild.me.guild_permissions.manage_permissions}")
+            logger.error(f"Has Administrator: {interaction.guild.me.guild_permissions.administrator}")
             logger.error(f"Bot role hierarchy position: {interaction.guild.me.top_role.position}")
             logger.error(f"Bot role: {interaction.guild.me.top_role.name}")
+            logger.error(f"All bot roles: {[role.name for role in interaction.guild.me.roles]}")
+            logger.error(f"Server owner: {interaction.guild.owner}")
+            logger.error(f"Bot is owner: {interaction.guild.me.guild_permissions.administrator}")
             await room_manager.cleanup_room(room.room_id)
             await interaction.followup.send("❌ Failed to create listening room category. Check bot permissions and role hierarchy.")
             return
