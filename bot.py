@@ -3050,10 +3050,10 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 interaction.guild.default_role: discord.PermissionOverwrite(
                     speak=False,  # Users start muted but can unmute themselves
                     use_voice_activation=True,  # Enable voice activation
-                    view_channel=True,  # Can see the channels
-                    connect=True,  # Can join voice
-                    send_messages=True,  # Can send messages in chat
-                    add_reactions=True  # Can react to messages
+                    view_channel=False,  # Private by default; revealed per-user on join
+                    connect=False,  # Private by default
+                    send_messages=False,  # Private by default
+                    add_reactions=False  # Private by default
                 ),
                 interaction.user: discord.PermissionOverwrite(
                     # Room creator can speak and use voice activation
@@ -3094,13 +3094,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 reason="Listening room created"  # Add reason for audit log
             )
 
-            # Reveal category and channels after initial quiet setup
-            try:
-                await room.category.set_permissions(interaction.guild.default_role, view_channel=True)
-                await room.text_channel.set_permissions(interaction.guild.default_role, view_channel=True)
-                await room.voice_channel.set_permissions(interaction.guild.default_role, view_channel=True)
-            except Exception as _:
-                pass
+            # Keep private by default; access is granted to members when they join
             
         except Exception as e:
             logger.error(f"Failed to create channels: {e}")
@@ -3284,7 +3278,15 @@ async def join_room_command(interaction: discord.Interaction, room_id: str):
     
     room = room_manager.get_room(room_id)
     await interaction.followup.send(f"✅ Joined listening room for **{room.artist} - {room.album}**!\n\nVoice: {room.voice_channel.mention}\nChat: {room.text_channel.mention}")
-    
+
+    # Grant this member access to private channels
+    try:
+        await room.category.set_permissions(interaction.user, view_channel=True)
+        await room.text_channel.set_permissions(interaction.user, view_channel=True, send_messages=True, add_reactions=True)
+        await room.voice_channel.set_permissions(interaction.user, view_channel=True, connect=True, speak=True, use_voice_activation=True)
+    except Exception:
+        pass
+
     # Announce in the text channel
     if room.text_channel:
         await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})", allowed_mentions=discord.AllowedMentions.none())
@@ -3391,15 +3393,23 @@ async def on_interaction(interaction: discord.Interaction):
                 await interaction.response.send_message(f"❌ Failed to join room.", ephemeral=True)
             return
         
-        room = room_manager.get_room(room_id)
-        await interaction.response.send_message(
-            f"✅ Joined listening room for **{room.artist} - {room.album}**!\n\nVoice: {room.voice_channel.mention}\nChat: {room.text_channel.mention}",
-            ephemeral=True
-        )
-        
-        # Announce in the text channel
-        if room.text_channel:
-            await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})", allowed_mentions=discord.AllowedMentions.none())
+    room = room_manager.get_room(room_id)
+    await interaction.response.send_message(
+        f"✅ Joined listening room for **{room.artist} - {room.album}**!\n\nVoice: {room.voice_channel.mention}\nChat: {room.text_channel.mention}",
+        ephemeral=True
+    )
+
+    # Grant this member access to private channels (if not already set)
+    try:
+        await room.category.set_permissions(interaction.user, view_channel=True)
+        await room.text_channel.set_permissions(interaction.user, view_channel=True, send_messages=True, add_reactions=True)
+        await room.voice_channel.set_permissions(interaction.user, view_channel=True, connect=True, speak=True, use_voice_activation=True)
+    except Exception:
+        pass
+
+    # Announce in the text channel
+    if room.text_channel:
+        await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})", allowed_mentions=discord.AllowedMentions.none())
 
 
 # ==================== PLAYBACK CONTROL COMMANDS ====================
