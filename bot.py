@@ -3058,8 +3058,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     connect=True,  # Can join voice
                     read_message_history=True,  # Can read chat history
                     send_messages=True,  # Can send messages in chat
-                    add_reactions=True,  # Can react to messages
-                    use_slash_commands=True  # Can use slash commands to unmute
+                    add_reactions=True  # Can react to messages
                 ),
                 interaction.user: discord.PermissionOverwrite(
                     # Room creator can speak and use voice activation
