@@ -2998,7 +2998,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             # Category permissions - users can control their own voice state
             category_overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(
-                    view_channel=True,  # Can see the category
+                    view_channel=False,  # Hide category until setup completes
                     connect=True,  # Can join voice channels
                     speak=False,  # Users start muted but can unmute themselves
                     use_voice_activation=True,  # Enable voice activation
@@ -3093,6 +3093,14 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 overwrites=overwrites,  # Use same permission overwrites
                 reason="Listening room created"  # Add reason for audit log
             )
+
+            # Reveal category and channels after initial quiet setup
+            try:
+                await room.category.set_permissions(interaction.guild.default_role, view_channel=True)
+                await room.text_channel.set_permissions(interaction.guild.default_role, view_channel=True)
+                await room.voice_channel.set_permissions(interaction.guild.default_role, view_channel=True)
+            except Exception as _:
+                pass
             
         except Exception as e:
             logger.error(f"Failed to create channels: {e}")
