@@ -3022,6 +3022,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     view_channel=True,
                     connect=True,
                     speak=True,
+                    use_voice_activation=True,
                     manage_channels=True,
                     send_messages=True,
                     mention_everyone=True,
@@ -3066,6 +3067,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 interaction.guild.me: discord.PermissionOverwrite(
                     speak=True,  # Bot can speak (for music)
                     connect=True,
+                    use_voice_activation=True,
                     manage_channels=True,
                     send_messages=True
                 )
