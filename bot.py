@@ -3026,49 +3026,52 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             source_data=source_data
         )
         
-        # Create a category for this listening room with notification settings
+        # Create a category for this listening room
         category_name = f"🎵 {album} - {interaction.user.display_name}"
         try:
-            # Create category with notification settings
-            # Category permissions - users can control their own voice state
-            category_overwrites = {
-                interaction.guild.default_role: discord.PermissionOverwrite(
-                    view_channel=False,  # Hide category until setup completes
-                    connect=True,  # Can join voice channels
-                    speak=False,  # Users start muted but can unmute themselves
-                    use_voice_activation=True,  # Enable voice activation
-                    send_messages=True,  # Can send messages
-                    add_reactions=True,  # Can react to messages
-                    # Mute notifications for everyone by default
-                    mention_everyone=False,  # Cannot mention @everyone
-                ),
-                interaction.user: discord.PermissionOverwrite(
-                    # Room creator gets full permissions including notifications
-                    view_channel=True,
-                    connect=True,
-                    speak=True,  # Room creator can always speak
-                    use_voice_activation=True,
-                    send_messages=True,
-                    add_reactions=True,
-                    mention_everyone=True,  # Can mention @everyone
-                ),
+            # Phase 1: Create category with minimal bot-only permissions
+            # Following Discord best practices: avoid complex overwrites at creation
+            minimal_overwrites = {
                 interaction.guild.me: discord.PermissionOverwrite(
-                    # Bot needs full permissions
                     view_channel=True,
-                    connect=True,
-                    speak=True,
-                    use_voice_activation=True,
                     manage_channels=True,
                     manage_permissions=True,
+                    connect=True,
+                    speak=True,
                     send_messages=True,
-                    mention_everyone=True,
+                    mention_everyone=True
                 )
             }
             
             room.category = await interaction.guild.create_category(
                 name=category_name,
-                overwrites=category_overwrites,
+                overwrites=minimal_overwrites,
                 reason="Listening room category created"
+            )
+            
+            # Phase 2: Apply privacy settings after successful creation
+            # This avoids Discord permission conflicts and race conditions
+            
+            # Make category private by default
+            await room.category.set_permissions(
+                interaction.guild.default_role,
+                view_channel=False,
+                connect=False,
+                send_messages=False,
+                add_reactions=False,
+                mention_everyone=False
+            )
+            
+            # Grant creator full access to category
+            await room.category.set_permissions(
+                interaction.user,
+                view_channel=True,
+                connect=True,
+                speak=True,
+                use_voice_activation=True,
+                send_messages=True,
+                add_reactions=True,
+                mention_everyone=True
             )
             
         except Exception as e:
@@ -3097,32 +3100,17 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         voice_channel_name = f"🎵 {album} - {interaction.user.display_name}"
         
         try:
-            # Set up permissions for listening room - users can unmute themselves
-            overwrites = {
-                interaction.guild.default_role: discord.PermissionOverwrite(
-                    speak=False,  # Users start muted but can unmute themselves
-                    use_voice_activation=True,  # Enable voice activation
-                    view_channel=False,  # Private by default; revealed per-user on join
-                    connect=False,  # Private by default
-                    send_messages=False,  # Private by default
-                    add_reactions=False  # Private by default
-                ),
-                interaction.user: discord.PermissionOverwrite(
-                    # Room creator can speak and use voice activation
-                    speak=True,  # Room creator can always speak
-                    use_voice_activation=True,
-                    view_channel=True,
-                    connect=True,
-                    send_messages=True,
-                    add_reactions=True
-                ),
+            # Phase 1: Create channels with minimal bot-only permissions
+            # Channels will inherit privacy from the category we just configured
+            bot_only_overwrites = {
                 interaction.guild.me: discord.PermissionOverwrite(
-                    speak=True,  # Bot can speak (for music)
+                    speak=True,
                     connect=True,
                     use_voice_activation=True,
                     manage_channels=True,
                     manage_permissions=True,
-                    send_messages=True
+                    send_messages=True,
+                    view_channel=True
                 )
             }
             
@@ -3130,24 +3118,46 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             bitrate_bps = BotConstants.AUDIO_BITRATE_BPS
             room.voice_channel = await interaction.guild.create_voice_channel(
                 name=voice_channel_name,
-                category=room.category,  # Use the created category
+                category=room.category,  # Inherits privacy from category
                 user_limit=room.max_participants,
                 bitrate=bitrate_bps,
-                overwrites=overwrites,
-                reason="Listening room created"  # Add reason for audit log
+                overwrites=bot_only_overwrites,
+                reason="Listening room created"
             )
             
             # Create persistent text channel
             text_channel_name = f"💬-{album.lower().replace(' ', '-')}-chat"
             room.text_channel = await interaction.guild.create_text_channel(
                 name=text_channel_name,
-                category=room.category,  # Use the created category
+                category=room.category,  # Inherits privacy from category
                 topic=f"Chat for listening to {artist} - {album} | Room ID: {room.room_id}",
-                overwrites=overwrites,  # Use same permission overwrites
-                reason="Listening room created"  # Add reason for audit log
+                overwrites=bot_only_overwrites,
+                reason="Listening room created"
             )
 
-            # Keep private by default; access is granted to members when they join
+            # Phase 2: Configure voice-specific permissions after creation
+            # Set voice channel permissions for room creator (users start muted but can unmute)
+            await room.voice_channel.set_permissions(
+                interaction.user,
+                view_channel=True,
+                connect=True,
+                speak=True,  # Creator can always speak
+                use_voice_activation=True,
+                send_messages=True,
+                add_reactions=True
+            )
+            
+            # Set text channel permissions for room creator
+            await room.text_channel.set_permissions(
+                interaction.user,
+                view_channel=True,
+                send_messages=True,
+                add_reactions=True,
+                mention_everyone=True
+            )
+
+            # Note: @everyone permissions are already set at category level and inherited
+            # When users join via /join command, we'll grant them specific permissions
             
         except Exception as e:
             logger.error(f"Failed to create channels: {e}")
@@ -3332,13 +3342,40 @@ async def join_room_command(interaction: discord.Interaction, room_id: str):
     room = room_manager.get_room(room_id)
     await interaction.followup.send(f"✅ Joined listening room for **{room.artist} - {room.album}**!\n\nVoice: {room.voice_channel.mention}\nChat: {room.text_channel.mention}")
 
-    # Grant this member access to private channels
+    # Phase 3: Grant this member access to private channels
+    # Following Discord best practices: explicit permission grants for private channels
     try:
-        await room.category.set_permissions(interaction.user, view_channel=True)
-        await room.text_channel.set_permissions(interaction.user, view_channel=True, send_messages=True, add_reactions=True)
-        await room.voice_channel.set_permissions(interaction.user, view_channel=True, connect=True, speak=True, use_voice_activation=True)
-    except Exception:
-        pass
+        # Grant category access
+        await room.category.set_permissions(
+            interaction.user,
+            view_channel=True,
+            connect=True,
+            send_messages=True,
+            add_reactions=True
+        )
+        
+        # Grant text channel access
+        await room.text_channel.set_permissions(
+            interaction.user,
+            view_channel=True,
+            send_messages=True,
+            add_reactions=True
+        )
+        
+        # Grant voice channel access (users start muted but can unmute themselves)
+        await room.voice_channel.set_permissions(
+            interaction.user,
+            view_channel=True,
+            connect=True,
+            speak=False,  # Start muted but can unmute themselves
+            use_voice_activation=True
+        )
+        
+        logger.info(f"Granted private channel access to {interaction.user.display_name} in room {room_id}")
+        
+    except Exception as e:
+        logger.error(f"Failed to grant channel permissions to {interaction.user.display_name}: {e}")
+        # Don't fail the join if permission setting fails - they're already in the room
 
     # Announce in the text channel
     if room.text_channel:
@@ -3504,13 +3541,40 @@ async def on_interaction(interaction: discord.Interaction):
         ephemeral=True
     )
 
-    # Grant this member access to private channels (if not already set)
+    # Phase 3: Grant this member access to private channels
+    # Following Discord best practices: explicit permission grants for private channels
     try:
-        await room.category.set_permissions(interaction.user, view_channel=True)
-        await room.text_channel.set_permissions(interaction.user, view_channel=True, send_messages=True, add_reactions=True)
-        await room.voice_channel.set_permissions(interaction.user, view_channel=True, connect=True, speak=True, use_voice_activation=True)
-    except Exception:
-        pass
+        # Grant category access
+        await room.category.set_permissions(
+            interaction.user,
+            view_channel=True,
+            connect=True,
+            send_messages=True,
+            add_reactions=True
+        )
+        
+        # Grant text channel access
+        await room.text_channel.set_permissions(
+            interaction.user,
+            view_channel=True,
+            send_messages=True,
+            add_reactions=True
+        )
+        
+        # Grant voice channel access (users start muted but can unmute themselves)
+        await room.voice_channel.set_permissions(
+            interaction.user,
+            view_channel=True,
+            connect=True,
+            speak=False,  # Start muted but can unmute themselves
+            use_voice_activation=True
+        )
+        
+        logger.info(f"Granted private channel access to {interaction.user.display_name} in room {room_id} (button)")
+        
+    except Exception as e:
+        logger.error(f"Failed to grant channel permissions to {interaction.user.display_name} (button): {e}")
+        # Don't fail the join if permission setting fails - they're already in the room
 
     # Announce in the text channel
     if room.text_channel:
