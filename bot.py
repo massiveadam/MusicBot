@@ -437,7 +437,8 @@ class ListeningRoom:
                                     user_limit=old.user_limit,
                                     bitrate=old.bitrate,
                                     overwrites=old.overwrites,
-                                    reason="Recreate channel to recover from voice 4006"
+                                    reason="Recreate channel to recover from voice 4006",
+                                    suppress_notifications=True  # Prevent notifications when recreating channel
                                 )
                                 # Swap
                                 self.voice_channel = new_vc
@@ -3057,7 +3058,8 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     connect=True,  # Can join voice
                     read_message_history=True,  # Can read chat history
                     send_messages=True,  # Can send messages in chat
-                    add_reactions=True  # Can react to messages
+                    add_reactions=True,  # Can react to messages
+                    use_slash_commands=True  # Can use slash commands to unmute
                 ),
                 interaction.user: discord.PermissionOverwrite(
                     # Room creator can speak and use voice activation
@@ -3086,7 +3088,8 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 user_limit=room.max_participants,
                 bitrate=bitrate_bps,
                 overwrites=overwrites,
-                reason="Listening room created"  # Add reason for audit log
+                reason="Listening room created",  # Add reason for audit log
+                suppress_notifications=True  # Prevent notifications when channel is created
             )
             
             # Create persistent text channel with notification suppression
@@ -3096,7 +3099,8 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 category=room.category,  # Use the created category
                 topic=f"Chat for listening to {artist} - {album} | Room ID: {room.room_id}",
                 overwrites=overwrites,  # Use same permission overwrites
-                reason="Listening room created"  # Add reason for audit log
+                reason="Listening room created",  # Add reason for audit log
+                suppress_notifications=True  # Prevent notifications when channel is created
             )
             
         except Exception as e:
