@@ -2862,7 +2862,10 @@ async def diagnose_permissions(interaction: discord.Interaction):
             ("Administrator", perms.administrator),
             ("View Channels", perms.view_channel),
             ("Connect", perms.connect),
-            ("Speak", perms.speak)
+            ("Speak", perms.speak),
+            ("Use Voice Activity", perms.use_voice_activation),
+            ("Priority Speaker", perms.priority_speaker),
+            ("Stream", perms.stream)
         ]
         
         perm_status = []
@@ -2892,9 +2895,38 @@ async def diagnose_permissions(interaction: discord.Interaction):
             )
             test_result += "✅ Category creation: SUCCESS\n"
             
-            # Clean up immediately
+            # Test voice channel creation
+            test_voice = await guild.create_voice_channel(
+                name="🧪 Voice Test",
+                category=test_category,
+                overwrites={
+                    bot_member: discord.PermissionOverwrite(
+                        view_channel=True,
+                        connect=True,
+                        speak=True,
+                        use_voice_activation=True,
+                        manage_channels=True,
+                        manage_permissions=True
+                    )
+                }
+            )
+            test_result += "✅ Voice channel creation: SUCCESS\n"
+            
+            # Test voice connection
+            try:
+                voice_client = await test_voice.connect()
+                test_result += "✅ Voice connection: SUCCESS\n"
+                await voice_client.disconnect(force=True)
+                test_result += "✅ Voice disconnect: SUCCESS\n"
+            except discord.Forbidden as ve:
+                test_result += f"❌ Voice connection: FORBIDDEN - {ve}\n"
+            except Exception as ve:
+                test_result += f"❌ Voice connection: ERROR - {ve}\n"
+            
+            # Clean up
+            await test_voice.delete(reason="Permission test cleanup")
             await test_category.delete(reason="Permission test cleanup")
-            test_result += "✅ Category deletion: SUCCESS"
+            test_result += "✅ Cleanup: SUCCESS"
             
         except discord.Forbidden as e:
             test_result += f"❌ Category creation: FAILED\n"
@@ -3448,43 +3480,43 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         # Store the message reference for UI updates
         room.now_playing_message = loading_msg
         
-        # Auto-start playback with retries
-        await asyncio.sleep(2)  # Give more time for voice connection to stabilize
+        # Replace interface with ready-to-start button (no auto-start)
+        ready_embed = discord.Embed(
+            title="🎵 Listening Room Ready!",
+            description=f"**{artist} - {album}**\n\n"
+                       f"🎧 Bot is connected and tracks are loaded!\n"
+                       f"👥 Participants: {len(room.participants)}/{room.max_participants}\n"
+                       f"🎵 Ready to start: **{len(room.tracks)} tracks**\n\n"
+                       f"*Host can start playback when everyone is ready*",
+            color=discord.Color.green()
+        )
+        ready_embed.add_field(
+            name="🎼 First Track", 
+            value=room.tracks[0].title if room.tracks else "Unknown", 
+            inline=True
+        )
+        ready_embed.add_field(
+            name="🎤 Artist", 
+            value=room.tracks[0].artist if room.tracks else "Unknown", 
+            inline=True
+        )
+        ready_embed.set_footer(text=f"Room ID: {room.room_id} | Host: {interaction.user.display_name}")
         
-        auto_start_success = False
-        for attempt in range(3):  # Try 3 times
-            logger.info(f"Auto-start attempt {attempt + 1}/3 for room {room.room_id}")
-            
-            # Check voice connection before trying to play
-            if not room.voice_client or not room.voice_client.is_connected():
-                logger.warning(f"Voice not connected on attempt {attempt + 1}, reconnecting...")
-                await room.connect_voice()
-                await asyncio.sleep(1)
-            
-            success = await room.play_current_track()
-            if success:
-                auto_start_success = True
-                logger.info(f"Auto-start successful on attempt {attempt + 1}")
-                break
-            else:
-                logger.warning(f"Auto-start failed on attempt {attempt + 1}")
-                await asyncio.sleep(2)  # Wait before retry
+        # Create start button view
+        start_view = discord.ui.View(timeout=None)
+        start_button = discord.ui.Button(
+            label="▶️ Start Listening Party",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"start_playback:{room.room_id}"
+        )
+        start_view.add_item(start_button)
         
-        # Update UI based on success/failure
-        if auto_start_success:
-            # Update the embed to show now playing
-            updated_embed = await create_now_playing_embed(room)
-            await playback_controls.update_buttons(room)
-            await loading_msg.edit(
-                content=f"🎵 **Now playing {artist} - {album}**",
-                embed=updated_embed,
-                view=playback_controls
-            )
-            await room.text_channel.send(f"🎵 Auto-started playback! **{room.current_track_info}**", allowed_mentions=discord.AllowedMentions.none())
-        else:
-            logger.error(f"Failed to auto-start playback after 3 attempts in room {room.room_id}")
-            await room.text_channel.send("⚠️ Tracks loaded but auto-start failed. Use the ▶️ button to start manually.", allowed_mentions=discord.AllowedMentions.none())
-            await room.text_channel.send("💡 **Tip:** Try `/debug` and `/reconnect` if you have issues.", allowed_mentions=discord.AllowedMentions.none())
+        # Update the message to show ready state with start button
+        await loading_msg.edit(
+            content="✅ Album loaded and ready to start!",
+            embed=ready_embed,
+            view=start_view
+        )
         
         logger.info(f"Successfully created listening room {room.room_id} for {artist} - {album}")
         
@@ -3763,6 +3795,44 @@ async def on_interaction(interaction: discord.Interaction):
     # Announce in the text channel
     if room.text_channel:
         await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})", allowed_mentions=discord.AllowedMentions.none())
+
+    elif interaction.data.get("custom_id", "").startswith("start_playback:"):
+        room_id = interaction.data["custom_id"].split(":", 1)[1]
+        room = room_manager.get_room(room_id)
+        
+        if not room:
+            await interaction.response.send_message("❌ Room not found.", ephemeral=True)
+            return
+            
+        # Only host can start playback
+        if interaction.user.id != room.host.id:
+            await interaction.response.send_message("❌ Only the room host can start playback.", ephemeral=True)
+            return
+            
+        await interaction.response.defer()
+        
+        # Start playback
+        success = await room.play_current_track()
+        if success:
+            # Update to now playing interface
+            now_playing_embed = await create_now_playing_embed(room)
+            playback_controls = PlaybackControlView(room.room_id)
+            await playback_controls.update_buttons(room)
+            
+            # Update the message to show now playing
+            await interaction.edit_original_response(
+                content=f"🎵 **Now playing {room.artist} - {room.album}**",
+                embed=now_playing_embed,
+                view=playback_controls
+            )
+            
+            # Update the stored message reference
+            room.now_playing_message = await interaction.original_response()
+            
+            # Announce in chat
+            await room.text_channel.send(f"🎵 **{interaction.user.display_name}** started the listening party! **{room.current_track_info}**", allowed_mentions=discord.AllowedMentions.none())
+        else:
+            await interaction.followup.send("❌ Failed to start playback. Try again or use `/play` command.", ephemeral=True)
 
 
 # ==================== PLAYBACK CONTROL COMMANDS ====================
