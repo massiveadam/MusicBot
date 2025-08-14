@@ -73,10 +73,10 @@ class BotConstants:
         "-reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 5 -rw_timeout 5000000")
     
     FFMPEG_OPTIONS = os.getenv("FFMPEG_OPTIONS",
-        "-vn -probesize 256k -analyzeduration 1M -use_wallclock_as_timestamps 1 -af aresample=async=1:min_hard_comp=0.100:first_pts=0")
+        "-vn -probesize 256k -analyzeduration 1M -af aresample=48000:async=0")
     
     FFMPEG_OPUS_OPTIONS = os.getenv("FFMPEG_OPUS_OPTIONS",
-        "-vn -acodec libopus -ar 48000 -ac 2 -b:a 96k -vbr constrained -compression_level 10 -application audio -frame_duration 60 -probesize 256k -analyzeduration 1M -use_wallclock_as_timestamps 1 -af aresample=async=1:min_hard_comp=0.100:first_pts=0")
+        "-vn -acodec libopus -ar 48000 -ac 2 -b:a 96k -vbr constrained -compression_level 10 -application audio -frame_duration 60 -probesize 256k -analyzeduration 1M -af aresample=48000:async=0")
     
     # Scheduled Tasks
     HOT_UPDATES_HOUR = int(os.getenv("HOT_UPDATES_HOUR", "17"))
