@@ -3059,7 +3059,6 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     speak=True,
                     use_voice_activation=True,
                     manage_channels=True,
-                    manage_permissions=True,
                     send_messages=True,
                     mention_everyone=True,
                 )
@@ -3082,6 +3081,13 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             logger.error(f"All bot roles: {[role.name for role in interaction.guild.me.roles]}")
             logger.error(f"Server owner: {interaction.guild.owner}")
             logger.error(f"Bot is owner: {interaction.guild.me.guild_permissions.administrator}")
+            
+            # Additional debugging for role hierarchy
+            logger.error(f"All server roles (position:name): {[(role.position, role.name) for role in interaction.guild.roles]}")
+            logger.error(f"Bot's top role position: {interaction.guild.me.top_role.position}")
+            logger.error(f"@everyone role position: {interaction.guild.default_role.position}")
+            logger.error(f"Bot is above @everyone: {interaction.guild.me.top_role.position > interaction.guild.default_role.position}")
+            
             await room_manager.cleanup_room(room.room_id)
             await interaction.followup.send("❌ Failed to create listening room category. Check bot permissions and role hierarchy.")
             return
@@ -3114,7 +3120,6 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     connect=True,
                     use_voice_activation=True,
                     manage_channels=True,
-                    manage_permissions=True,
                     send_messages=True
                 )
             }
