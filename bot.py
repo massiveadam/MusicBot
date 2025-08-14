@@ -3411,23 +3411,22 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         # Suppress mentions to avoid pings/notifications
         await room.text_channel.send(welcome_msg, allowed_mentions=discord.AllowedMentions.none())
         
-        # Load tracks and start audio setup
-        loading_msg = await room.text_channel.send("📀 Loading tracks...", allowed_mentions=discord.AllowedMentions.none())
+        # Connect to voice channel first (bot joins and waits quietly)
+        loading_msg = await room.text_channel.send("🎧 Connecting to voice channel...", allowed_mentions=discord.AllowedMentions.none())
         
-        # Load album tracks
-        tracks_loaded = await room.load_tracks()
-        if not tracks_loaded:
-            await loading_msg.edit(content="❌ Failed to load tracks for this album.")
-            await room_manager.cleanup_room(room.room_id)
-            return
-        
-        # Update status: tracks loaded, now connecting to voice
-        await loading_msg.edit(content="🎵 Tracks loaded! Connecting to voice channel...")
-        
-        # Connect to voice channel
         voice_connected = await room.connect_voice()
         if not voice_connected:
             await loading_msg.edit(content="❌ Failed to connect to voice channel.")
+            await room_manager.cleanup_room(room.room_id)
+            return
+        
+        # Update status: connected, now loading tracks
+        await loading_msg.edit(content="📀 Connected! Loading tracks...")
+        
+        # Load album tracks while connected to voice
+        tracks_loaded = await room.load_tracks()
+        if not tracks_loaded:
+            await loading_msg.edit(content="❌ Failed to load tracks for this album.")
             await room_manager.cleanup_room(room.room_id)
             return
         
