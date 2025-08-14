@@ -3544,7 +3544,8 @@ async def join_room_command(interaction: discord.Interaction, room_id: str):
             interaction.user,
             view_channel=True,
             connect=True,
-            speak=False,  # Start muted but can unmute themselves
+            # Note: Not setting speak=False allows users to unmute themselves
+            # Discord will start them muted by default but they can toggle
             use_voice_activation=True
         )
         
@@ -3743,7 +3744,8 @@ async def on_interaction(interaction: discord.Interaction):
             interaction.user,
             view_channel=True,
             connect=True,
-            speak=False,  # Start muted but can unmute themselves
+            # Note: Not setting speak=False allows users to unmute themselves
+            # Discord will start them muted by default but they can toggle
             use_voice_activation=True
         )
         
