@@ -13,12 +13,12 @@ class BotConstants:
     MAX_ROOM_PARTICIPANTS = int(os.getenv("MAX_ROOM_PARTICIPANTS", "5"))
     ROOM_ID_LENGTH = int(os.getenv("ROOM_ID_LENGTH", "8"))
     
-    # Voice Connection
+    # Voice Connection  
     VOICE_CONNECT_TIMEOUT = int(os.getenv("VOICE_CONNECT_TIMEOUT", "45"))
-    VOICE_RETRY_ATTEMPTS = int(os.getenv("VOICE_RETRY_ATTEMPTS", "8"))
+    VOICE_RETRY_ATTEMPTS = int(os.getenv("VOICE_RETRY_ATTEMPTS", "4"))  # Reduced from 8 to minimize join/leave cycles
     VOICE_BASE_DELAY = float(os.getenv("VOICE_BASE_DELAY", "2.0"))
-    VOICE_MAX_DELAY = float(os.getenv("VOICE_MAX_DELAY", "32.0"))
-    VOICE_STABILIZE_DELAY = float(os.getenv("VOICE_STABILIZE_DELAY", "2.0"))
+    VOICE_MAX_DELAY = float(os.getenv("VOICE_MAX_DELAY", "16.0"))  # Reduced max delay
+    VOICE_STABILIZE_DELAY = float(os.getenv("VOICE_STABILIZE_DELAY", "3.0"))  # Slightly increased for stability
     
     # Audio Settings
     AUDIO_BITRATE_BPS = int(os.getenv("AUDIO_BITRATE_BPS", "96000"))

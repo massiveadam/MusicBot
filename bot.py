@@ -3421,12 +3421,18 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             await room_manager.cleanup_room(room.room_id)
             return
         
+        # Update status: tracks loaded, now connecting to voice
+        await loading_msg.edit(content="🎵 Tracks loaded! Connecting to voice channel...")
+        
         # Connect to voice channel
         voice_connected = await room.connect_voice()
         if not voice_connected:
             await loading_msg.edit(content="❌ Failed to connect to voice channel.")
             await room_manager.cleanup_room(room.room_id)
             return
+        
+        # Update status: ready to play
+        await loading_msg.edit(content="✅ Ready! Starting playback...")
         
         # Create now playing embed and controls
         now_playing_embed = await create_now_playing_embed(room)
