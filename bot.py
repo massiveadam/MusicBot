@@ -3151,41 +3151,54 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             # Phase 2: Apply privacy settings after successful creation
             logger.info("Applying privacy settings to category")
             
-            # Make category private by default
-            await room.category.set_permissions(
-                interaction.guild.default_role,
-                view_channel=False,
-                connect=False,
-                send_messages=False,
-                add_reactions=False,
-                mention_everyone=False
-            )
-            
-            # Grant bot full permissions
-            await room.category.set_permissions(
-                interaction.guild.me,
-                view_channel=True,
-                manage_channels=True,
-                manage_permissions=True,
-                connect=True,
-                speak=True,
-                send_messages=True,
-                mention_everyone=True
-            )
-            
-            # Grant creator full access to category
-            await room.category.set_permissions(
-                interaction.user,
-                view_channel=True,
-                connect=True,
-                speak=True,
-                use_voice_activation=True,
-                send_messages=True,
-                add_reactions=True,
-                mention_everyone=True
-            )
-            
-            logger.info("Category privacy settings applied successfully")
+            try:
+                # Make category private by default
+                logger.info("Setting @everyone permissions to deny view_channel")
+                await room.category.set_permissions(
+                    interaction.guild.default_role,
+                    view_channel=False,
+                    connect=False,
+                    send_messages=False,
+                    add_reactions=False,
+                    mention_everyone=False
+                )
+                logger.info("✅ @everyone permissions set successfully")
+                
+                # Grant bot full permissions
+                logger.info("Setting bot permissions")
+                await room.category.set_permissions(
+                    interaction.guild.me,
+                    view_channel=True,
+                    manage_channels=True,
+                    manage_permissions=True,
+                    connect=True,
+                    speak=True,
+                    send_messages=True,
+                    mention_everyone=True
+                )
+                logger.info("✅ Bot permissions set successfully")
+                
+                # Grant creator full access to category
+                logger.info("Setting creator permissions")
+                await room.category.set_permissions(
+                    interaction.user,
+                    view_channel=True,
+                    connect=True,
+                    speak=True,
+                    use_voice_activation=True,
+                    send_messages=True,
+                    add_reactions=True,
+                    mention_everyone=True
+                )
+                logger.info("✅ Creator permissions set successfully")
+                
+                logger.info("✅ All category privacy settings applied successfully")
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to apply privacy settings to category: {e}")
+                logger.error(f"Category ID: {room.category.id}")
+                logger.error(f"Bot permissions in category: {room.category.permissions_for(interaction.guild.me)}")
+                # Continue anyway - channels might still work
             
         except Exception as e:
             logger.error(f"Failed to create category: {e}")
@@ -3249,28 +3262,60 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             )
 
             # Phase 2: Configure voice-specific permissions after creation
-            # Set voice channel permissions for room creator (users start muted but can unmute)
-            await room.voice_channel.set_permissions(
-                interaction.user,
-                view_channel=True,
-                connect=True,
-                speak=True,  # Creator can always speak
-                use_voice_activation=True,
-                send_messages=True,
-                add_reactions=True
-            )
+            logger.info("Configuring channel-specific permissions")
             
-            # Set text channel permissions for room creator
-            await room.text_channel.set_permissions(
-                interaction.user,
-                view_channel=True,
-                send_messages=True,
-                add_reactions=True,
-                mention_everyone=True
-            )
+            try:
+                # Set voice channel permissions for room creator (users start muted but can unmute)
+                logger.info("Setting voice channel permissions for creator")
+                await room.voice_channel.set_permissions(
+                    interaction.user,
+                    view_channel=True,
+                    connect=True,
+                    speak=True,  # Creator can always speak
+                    use_voice_activation=True,
+                    send_messages=True,
+                    add_reactions=True
+                )
+                logger.info("✅ Voice channel creator permissions set")
+                
+                # Set text channel permissions for room creator
+                logger.info("Setting text channel permissions for creator")
+                await room.text_channel.set_permissions(
+                    interaction.user,
+                    view_channel=True,
+                    send_messages=True,
+                    add_reactions=True,
+                    mention_everyone=True
+                )
+                logger.info("✅ Text channel creator permissions set")
+                
+                # Verify that channels inherited category privacy
+                voice_perms = room.voice_channel.permissions_for(interaction.guild.default_role)
+                text_perms = room.text_channel.permissions_for(interaction.guild.default_role)
+                
+                logger.info(f"🔍 Voice channel @everyone can view: {voice_perms.view_channel}")
+                logger.info(f"🔍 Text channel @everyone can view: {text_perms.view_channel}")
+                
+                if voice_perms.view_channel or text_perms.view_channel:
+                    logger.warning("⚠️ Channels did not inherit privacy from category - applying directly")
+                    
+                    # Apply privacy directly to channels
+                    await room.voice_channel.set_permissions(
+                        interaction.guild.default_role,
+                        view_channel=False,
+                        connect=False
+                    )
+                    await room.text_channel.set_permissions(
+                        interaction.guild.default_role,
+                        view_channel=False,
+                        send_messages=False
+                    )
+                    logger.info("✅ Applied privacy settings directly to channels")
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to configure channel permissions: {e}")
 
-            # Note: @everyone permissions are already set at category level and inherited
-            # When users join via /join command, we'll grant them specific permissions
+            # Note: When users join via /join command, we'll grant them specific permissions
             
         except Exception as e:
             logger.error(f"Failed to create channels: {e}")
