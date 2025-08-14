@@ -1320,6 +1320,41 @@ class PlaybackControlView(discord.ui.View):
         except Exception as e:
             logger.error(f"Stop playback error: {e}")
             await interaction.response.send_message("❌ Failed to stop playback.", ephemeral=True)
+    
+    @discord.ui.button(label="🔗 Share", style=discord.ButtonStyle.secondary, custom_id="share_link")
+    async def share_link(self, interaction: discord.Interaction, button: discord.ui.Button):
+        room = room_manager.get_room(self.room_id)
+        if not room:
+            await interaction.response.send_message("❌ Room not found.", ephemeral=True)
+            return
+        
+        # Create a shareable link with room info
+        share_text = f"🎵 **Join this listening room!**\n\n"
+        share_text += f"**{room.artist} - {room.album}**\n"
+        share_text += f"Host: {room.host.display_name}\n"
+        share_text += f"Participants: {len(room.participants)}/{room.max_participants}\n"
+        share_text += f"Room ID: `{room.room_id}`\n\n"
+        share_text += f"Use `/join room_id:{room.room_id}` to join!"
+        
+        # Create an embed for the share
+        share_embed = discord.Embed(
+            title="🎵 Listening Room Invite",
+            description=share_text,
+            color=discord.Color.blue()
+        )
+        share_embed.add_field(name="Voice Channel", value=room.voice_channel.mention if room.voice_channel else "None", inline=True)
+        share_embed.add_field(name="Status", value="🎵 Playing" if room.is_playing else "⏸️ Paused", inline=True)
+        
+        # Add current track info if available
+        if room.current_track_info:
+            share_embed.add_field(name="Now Playing", value=room.current_track_info, inline=False)
+        
+        # Send the share message
+        await interaction.response.send_message(
+            content="🔗 **Share this link with others!**",
+            embed=share_embed,
+            ephemeral=True
+        )
 
 async def create_now_playing_embed(room: ListeningRoom) -> discord.Embed:
     """Create a 'Now Playing' embed for the room."""
@@ -3305,6 +3340,56 @@ async def leave_room_command(interaction: discord.Interaction):
     await interaction.followup.send(f"✅ Left listening room `{room_id}`.")
 
 
+class RoomListView(discord.ui.View):
+    """View for listing rooms with share buttons."""
+    
+    def __init__(self, rooms):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.rooms = rooms
+        
+        # Add share buttons for each room
+        for room in rooms:
+            button = discord.ui.Button(
+                label=f"🔗 Share {room.room_id}",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"share_room:{room.room_id}"
+            )
+            button.callback = self.create_share_callback(room)
+            self.add_item(button)
+    
+    def create_share_callback(self, room):
+        async def share_callback(interaction: discord.Interaction):
+            # Create a shareable link with room info
+            share_text = f"🎵 **Join this listening room!**\n\n"
+            share_text += f"**{room.artist} - {room.album}**\n"
+            share_text += f"Host: {room.host.display_name}\n"
+            share_text += f"Participants: {len(room.participants)}/{room.max_participants}\n"
+            share_text += f"Room ID: `{room.room_id}`\n\n"
+            share_text += f"Use `/join room_id:{room.room_id}` to join!"
+            
+            # Create an embed for the share
+            share_embed = discord.Embed(
+                title="🎵 Listening Room Invite",
+                description=share_text,
+                color=discord.Color.blue()
+            )
+            share_embed.add_field(name="Voice Channel", value=room.voice_channel.mention if room.voice_channel else "None", inline=True)
+            share_embed.add_field(name="Status", value="🎵 Playing" if room.is_playing else "⏸️ Paused", inline=True)
+            
+            # Add current track info if available
+            if room.current_track_info:
+                share_embed.add_field(name="Now Playing", value=room.current_track_info, inline=False)
+            
+            # Send the share message
+            await interaction.response.send_message(
+                content="🔗 **Share this link with others!**",
+                embed=share_embed,
+                ephemeral=True
+            )
+        
+        return share_callback
+
+
 @bot.tree.command(name="rooms", description="List all active listening rooms")
 async def list_rooms(interaction: discord.Interaction):
     """List all active listening rooms."""
@@ -3333,7 +3418,9 @@ async def list_rooms(interaction: discord.Interaction):
             inline=False
         )
     
-    await interaction.followup.send(embed=embed)
+    # Create view with share buttons if there are rooms
+    view = RoomListView(rooms) if rooms else None
+    await interaction.followup.send(embed=embed, view=view)
 
 
 @bot.tree.command(name="cleanup", description="[Admin] Delete all listening rooms and channels")
