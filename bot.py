@@ -3305,12 +3305,31 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                         view_channel=False,
                         connect=False
                     )
+                    # Ensure bot has voice channel permissions
+                    await room.voice_channel.set_permissions(
+                        interaction.guild.me,
+                        view_channel=True,
+                        connect=True,
+                        speak=True,
+                        use_voice_activation=True,
+                        manage_channels=True,
+                        manage_permissions=True
+                    )
+                    
                     await room.text_channel.set_permissions(
                         interaction.guild.default_role,
                         view_channel=False,
                         send_messages=False
                     )
-                    logger.info("✅ Applied privacy settings directly to channels")
+                    # Ensure bot has text channel permissions  
+                    await room.text_channel.set_permissions(
+                        interaction.guild.me,
+                        view_channel=True,
+                        send_messages=True,
+                        manage_channels=True,
+                        manage_permissions=True
+                    )
+                    logger.info("✅ Applied privacy settings directly to channels with bot permissions")
                 
             except Exception as e:
                 logger.error(f"❌ Failed to configure channel permissions: {e}")
