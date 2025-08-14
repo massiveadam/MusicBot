@@ -437,8 +437,7 @@ class ListeningRoom:
                                     user_limit=old.user_limit,
                                     bitrate=old.bitrate,
                                     overwrites=old.overwrites,
-                                    reason="Recreate channel to recover from voice 4006",
-                                    suppress_notifications=True  # Prevent notifications when recreating channel
+                                    reason="Recreate channel to recover from voice 4006"
                                 )
                                 # Swap
                                 self.voice_channel = new_vc
@@ -3087,19 +3086,17 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 user_limit=room.max_participants,
                 bitrate=bitrate_bps,
                 overwrites=overwrites,
-                reason="Listening room created",  # Add reason for audit log
-                suppress_notifications=True  # Prevent notifications when channel is created
+                reason="Listening room created"  # Add reason for audit log
             )
             
-            # Create persistent text channel with notification suppression
+            # Create persistent text channel
             text_channel_name = f"💬-{album.lower().replace(' ', '-')}-chat"
             room.text_channel = await interaction.guild.create_text_channel(
                 name=text_channel_name,
                 category=room.category,  # Use the created category
                 topic=f"Chat for listening to {artist} - {album} | Room ID: {room.room_id}",
                 overwrites=overwrites,  # Use same permission overwrites
-                reason="Listening room created",  # Add reason for audit log
-                suppress_notifications=True  # Prevent notifications when channel is created
+                reason="Listening room created"  # Add reason for audit log
             )
             
         except Exception as e:
