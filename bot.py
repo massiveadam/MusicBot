@@ -184,11 +184,16 @@ class AudioSource:
         temp_dir = None
         
         try:
+            logger.info(f"Starting Apple Music download: {apple_url}")
+            
             # Create temporary directory with proper error handling
             temp_dir = create_temp_directory(BotConstants.TEMP_DIR_PREFIX)
+            logger.info(f"Created temp directory: {temp_dir}")
             
-            # Download the album using gamdl with high quality
+            # Download the album using gamdl with high quality and timeout
+            logger.info("Starting GAMDL download...")
             returncode, output = await run_gamdl(apple_url, output_path=temp_dir, high_quality=config.HIGH_QUALITY_AUDIO)
+            
             if returncode != 0:
                 logger.error(f"Failed to download Apple Music album: {output}")
                 return []
@@ -317,17 +322,32 @@ class ListeningRoom:
     async def load_tracks(self) -> bool:
         """Load tracks based on source type."""
         try:
+            logger.info(f"Loading tracks for room {self.room_id} (source_type: {self.source_type})")
+            
             if self.source_type == "local":
+                logger.info(f"Loading local album from: {self.source_data}")
                 self.tracks = await AudioSource.prepare_local_album(self.source_data)
             elif self.source_type == "apple_music":
+                logger.info(f"Loading Apple Music album from: {self.source_data}")
                 self.tracks = await AudioSource.prepare_apple_music_album(self.source_data)
                 # Store temp directory for cleanup
                 if self.tracks and self.tracks[0].file_path:
                     self.temp_dir = os.path.dirname(self.tracks[0].file_path)
+            else:
+                logger.error(f"Unknown source type: {self.source_type}")
+                return False
             
+            logger.info(f"Successfully loaded {len(self.tracks)} tracks for room {self.room_id}")
             return len(self.tracks) > 0
+            
+        except asyncio.TimeoutError as e:
+            logger.error(f"Timeout while loading tracks for room {self.room_id}: {e}")
+            return False
         except Exception as e:
             logger.error(f"Failed to load tracks for room {self.room_id}: {e}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
     
     async def connect_voice(self) -> bool:
@@ -1519,26 +1539,49 @@ async def run_gamdl(
     
     cmd_args.append(url)
     
-    process = await asyncio.create_subprocess_exec(
-        *cmd_args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT
-    )
-    stdout, _ = await process.communicate()
-    output = stdout.decode("utf-8").strip()
-    
-    if process.returncode == 0:
-        logger.info(f"✅ Download succeeded with {codec}")
-    else:
-        # If ALAC failed, try falling back to AAC
-        if high_quality and codec == "alac":
-            logger.warning(f"❌ ALAC failed, falling back to AAC-legacy")
-            return await run_gamdl(url, cookies_path, "aac-legacy", remux_mode, output_path, False)
+    try:
+        # Add timeout to prevent hanging
+        process = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                *cmd_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT
+            ),
+            timeout=BotConstants.DOWNLOAD_TIMEOUT
+        )
+        
+        stdout, _ = await asyncio.wait_for(
+            process.communicate(),
+            timeout=BotConstants.DOWNLOAD_TIMEOUT
+        )
+        output = stdout.decode("utf-8").strip()
+        
+        if process.returncode == 0:
+            logger.info(f"✅ Download succeeded with {codec}")
         else:
-            logger.warning(f"❌ Failed with {codec}: {process.returncode}")
-            logger.warning(f"Output: {output}")
-    
-    return process.returncode, output
+            # If ALAC failed, try falling back to AAC
+            if high_quality and codec == "alac":
+                logger.warning(f"❌ ALAC failed, falling back to AAC-legacy")
+                return await run_gamdl(url, cookies_path, "aac-legacy", remux_mode, output_path, False)
+            else:
+                logger.warning(f"❌ Failed with {codec}: {process.returncode}")
+                logger.warning(f"Output: {output}")
+        
+        return process.returncode, output
+        
+    except asyncio.TimeoutError:
+        logger.error(f"❌ GAMDL download timed out after {BotConstants.DOWNLOAD_TIMEOUT}s")
+        # Try to kill the process if it's still running
+        try:
+            if process and process.returncode is None:
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+        except:
+            pass
+        return 1, f"Download timed out after {BotConstants.DOWNLOAD_TIMEOUT} seconds"
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in GAMDL: {e}")
+        return 1, f"Unexpected error: {str(e)}"
 
 
 async def download_album(interaction, url):
