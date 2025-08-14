@@ -2423,12 +2423,12 @@ class RecommendDropdown(discord.ui.View):
                 recipient = self.guild.get_member(user.id)
 
                 overwrites = {
-                    self.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                    self.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                    self.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    self.guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
                 }
 
                 if recipient:
-                    overwrites[recipient] = discord.PermissionOverwrite(read_messages=True, send_messages=False)
+                    overwrites[recipient] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
 
                 rec_channel = await self.guild.create_text_channel(rec_channel_name, overwrites=overwrites)
 
@@ -2602,9 +2602,9 @@ async def handle_save_logic(interaction, url: str, mirror_only=False):
             private = discord.utils.get(guild.text_channels, name=channel_name)
             if not private:
                 overwrites = {
-                    guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                    user: discord.PermissionOverwrite(read_messages=True, send_messages=False),
-                    guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                    guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    user: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+                    guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
                 }
                 private = await guild.create_text_channel(channel_name, overwrites=overwrites)
                 logger.info(f"Created new channel: {channel_name}")
@@ -3002,7 +3002,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     connect=True,  # Can join voice channels
                     speak=False,  # Users start muted but can unmute themselves
                     use_voice_activation=True,  # Enable voice activation
-                    read_messages=True,  # Can read chat history
+                    view_channel=True,  # Can see the category
                     send_messages=True,  # Can send messages
                     add_reactions=True,  # Can react to messages
                     # Mute notifications for everyone by default
@@ -3014,7 +3014,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     connect=True,
                     speak=True,  # Room creator can always speak
                     use_voice_activation=True,
-                    read_messages=True,
+                    view_channel=True,
                     send_messages=True,
                     add_reactions=True,
                     mention_everyone=True,  # Can mention @everyone
@@ -3026,7 +3026,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     speak=True,
                     manage_channels=True,
                     send_messages=True,
-                    read_messages=True,
+                    view_channel=True,
                     mention_everyone=True,
                 )
             }
@@ -3054,7 +3054,6 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     use_voice_activation=True,  # Enable voice activation
                     view_channel=True,  # Can see the channels
                     connect=True,  # Can join voice
-                    read_messages=True,  # Can read chat history
                     send_messages=True,  # Can send messages in chat
                     add_reactions=True  # Can react to messages
                 ),
@@ -3064,7 +3063,6 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     use_voice_activation=True,
                     view_channel=True,
                     connect=True,
-                    read_messages=True,
                     send_messages=True,
                     add_reactions=True
                 ),
@@ -3072,8 +3070,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     speak=True,  # Bot can speak (for music)
                     connect=True,
                     manage_channels=True,
-                    send_messages=True,
-                    read_messages=True
+                    send_messages=True
                 )
             }
             
