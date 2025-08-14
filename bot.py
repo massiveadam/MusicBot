@@ -2818,6 +2818,103 @@ async def clear_commands(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ Failed to clear commands: {e}", ephemeral=True)
 
 
+@bot.tree.command(name="diagnose", description="[Admin] Diagnose bot permissions and server settings")
+@commands.is_owner()
+async def diagnose_permissions(interaction: discord.Interaction):
+    """Diagnose bot permissions and server configuration."""
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    
+    try:
+        guild = interaction.guild
+        bot_member = guild.me
+        
+        # Basic permission check
+        perms = bot_member.guild_permissions
+        
+        # Server info
+        embed = discord.Embed(title="🔍 Bot Permissions Diagnosis", color=discord.Color.blue())
+        
+        # Basic Info
+        embed.add_field(
+            name="📊 Server Info",
+            value=f"Owner: {guild.owner}\n"
+                  f"2FA Required: {guild.mfa_level.name}\n"
+                  f"Categories: {len(guild.categories)}/50\n"
+                  f"Text Channels: {len(guild.text_channels)}/500\n"
+                  f"Voice Channels: {len(guild.voice_channels)}/500",
+            inline=False
+        )
+        
+        # Bot Role Info
+        embed.add_field(
+            name="🤖 Bot Role Info",
+            value=f"Role: {bot_member.top_role.name}\n"
+                  f"Position: {bot_member.top_role.position}\n"
+                  f"Highest Role: {max(guild.roles, key=lambda r: r.position).name}\n"
+                  f"Is Admin: {perms.administrator}",
+            inline=True
+        )
+        
+        # Critical Permissions
+        critical_perms = [
+            ("Manage Channels", perms.manage_channels),
+            ("Manage Permissions", perms.manage_roles),
+            ("Administrator", perms.administrator),
+            ("View Channels", perms.view_channel),
+            ("Connect", perms.connect),
+            ("Speak", perms.speak)
+        ]
+        
+        perm_status = []
+        for perm_name, has_perm in critical_perms:
+            status = "✅" if has_perm else "❌"
+            perm_status.append(f"{status} {perm_name}")
+        
+        embed.add_field(
+            name="🔐 Critical Permissions",
+            value="\n".join(perm_status),
+            inline=True
+        )
+        
+        # Test category creation
+        test_result = "🧪 **Category Creation Test**\n"
+        try:
+            # Try to create a test category
+            test_category = await guild.create_category(
+                name="🧪 Permission Test",
+                overwrites={
+                    bot_member: discord.PermissionOverwrite(
+                        view_channel=True,
+                        manage_channels=True,
+                        manage_permissions=True
+                    )
+                }
+            )
+            test_result += "✅ Category creation: SUCCESS\n"
+            
+            # Clean up immediately
+            await test_category.delete(reason="Permission test cleanup")
+            test_result += "✅ Category deletion: SUCCESS"
+            
+        except discord.Forbidden as e:
+            test_result += f"❌ Category creation: FAILED\n"
+            test_result += f"Error: {e}"
+        except Exception as e:
+            test_result += f"⚠️ Unexpected error: {e}"
+        
+        embed.add_field(
+            name="🧪 Live Test Results",
+            value=test_result,
+            inline=False
+        )
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Diagnosis failed: {e}")
+        await interaction.followup.send(f"❌ Diagnosis failed: {e}")
+
+
 @bot.tree.command(name="resync", description="[Admin] Clear and re-sync all commands")
 @commands.is_owner()
 async def resync_commands(interaction: discord.Interaction):
@@ -3029,28 +3126,30 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         # Create a category for this listening room
         category_name = f"🎵 {album} - {interaction.user.display_name}"
         try:
-            # Phase 1: Create category with minimal bot-only permissions
-            # Following Discord best practices: avoid complex overwrites at creation
-            minimal_overwrites = {
-                interaction.guild.me: discord.PermissionOverwrite(
-                    view_channel=True,
-                    manage_channels=True,
-                    manage_permissions=True,
-                    connect=True,
-                    speak=True,
-                    send_messages=True,
-                    mention_everyone=True
-                )
-            }
+            # Try simplified approach first - no overwrites at creation
+            logger.info(f"Attempting to create category: {category_name}")
             
-            room.category = await interaction.guild.create_category(
-                name=category_name,
-                overwrites=minimal_overwrites,
-                reason="Listening room category created"
-            )
+            try:
+                # Method 1: Minimal creation with no overwrites (most compatible)
+                room.category = await interaction.guild.create_category(
+                    name=category_name,
+                    reason="Listening room category created"
+                )
+                logger.info(f"Category created successfully: {room.category.id}")
+                
+            except discord.Forbidden:
+                # Method 2: Try with Administrator permission if available
+                if interaction.guild.me.guild_permissions.administrator:
+                    logger.info("Retrying category creation with admin permissions")
+                    room.category = await interaction.guild.create_category(
+                        name=category_name,
+                        reason="Listening room category created (admin retry)"
+                    )
+                else:
+                    raise
             
             # Phase 2: Apply privacy settings after successful creation
-            # This avoids Discord permission conflicts and race conditions
+            logger.info("Applying privacy settings to category")
             
             # Make category private by default
             await room.category.set_permissions(
@@ -3060,6 +3159,18 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 send_messages=False,
                 add_reactions=False,
                 mention_everyone=False
+            )
+            
+            # Grant bot full permissions
+            await room.category.set_permissions(
+                interaction.guild.me,
+                view_channel=True,
+                manage_channels=True,
+                manage_permissions=True,
+                connect=True,
+                speak=True,
+                send_messages=True,
+                mention_everyone=True
             )
             
             # Grant creator full access to category
@@ -3073,6 +3184,8 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 add_reactions=True,
                 mention_everyone=True
             )
+            
+            logger.info("Category privacy settings applied successfully")
             
         except Exception as e:
             logger.error(f"Failed to create category: {e}")
