@@ -3059,6 +3059,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     speak=True,
                     use_voice_activation=True,
                     manage_channels=True,
+                    manage_permissions=True,
                     send_messages=True,
                     mention_everyone=True,
                 )
@@ -3104,6 +3105,7 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     connect=True,
                     use_voice_activation=True,
                     manage_channels=True,
+                    manage_permissions=True,
                     send_messages=True
                 )
             }
