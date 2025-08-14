@@ -384,29 +384,13 @@ class ListeningRoom:
                 try:
                     logger.info(f"Connection attempt {attempt}/{max_attempts}")
                     
-                    # Strategy 1: Standard connect without library auto-retry (we manage retries)
-                    if attempt <= 4:
-                        self.voice_client = await self.voice_channel.connect(
-                            reconnect=False,
-                            timeout=BotConstants.VOICE_CONNECT_TIMEOUT,
-                            self_deaf=True
-                        )
-                    else:
-                        # Strategy 2: Hard reset, then connect fresh
-                        if self.voice_client:
-                            try:
-                                await self.voice_client.disconnect(force=True)
-                            except Exception:
-                                pass
-                            self.voice_client = None
-                            await asyncio.sleep(1.0)
-                        # Small jitter before retrying
-                        await asyncio.sleep(0.5 * attempt)
-                        self.voice_client = await self.voice_channel.connect(
-                            reconnect=False,
-                            timeout=BotConstants.VOICE_CONNECT_TIMEOUT * 1.5,  # Longer timeout for retry attempts
-                            self_deaf=True
-                        )
+                    # Let Discord.py handle its own retries with longer timeout
+                    # This avoids conflicts between our retry logic and Discord.py's internal retries
+                    self.voice_client = await self.voice_channel.connect(
+                        reconnect=False,
+                        timeout=BotConstants.VOICE_CONNECT_TIMEOUT,  # Now 60s to allow Discord.py retries
+                        self_deaf=True
+                    )
                     
                     # Wait for connection to stabilize
                     await asyncio.sleep(2.0)

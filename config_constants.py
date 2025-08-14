@@ -14,11 +14,11 @@ class BotConstants:
     ROOM_ID_LENGTH = int(os.getenv("ROOM_ID_LENGTH", "8"))
     
     # Voice Connection  
-    VOICE_CONNECT_TIMEOUT = int(os.getenv("VOICE_CONNECT_TIMEOUT", "45"))
-    VOICE_RETRY_ATTEMPTS = int(os.getenv("VOICE_RETRY_ATTEMPTS", "4"))  # Reduced from 8 to minimize join/leave cycles
-    VOICE_BASE_DELAY = float(os.getenv("VOICE_BASE_DELAY", "2.0"))
-    VOICE_MAX_DELAY = float(os.getenv("VOICE_MAX_DELAY", "16.0"))  # Reduced max delay
-    VOICE_STABILIZE_DELAY = float(os.getenv("VOICE_STABILIZE_DELAY", "3.0"))  # Slightly increased for stability
+    VOICE_CONNECT_TIMEOUT = int(os.getenv("VOICE_CONNECT_TIMEOUT", "60"))  # Increased timeout for Discord.py retries
+    VOICE_RETRY_ATTEMPTS = int(os.getenv("VOICE_RETRY_ATTEMPTS", "2"))  # Reduced to minimize conflicts with Discord.py retries
+    VOICE_BASE_DELAY = float(os.getenv("VOICE_BASE_DELAY", "5.0"))  # Increased delay between our retries
+    VOICE_MAX_DELAY = float(os.getenv("VOICE_MAX_DELAY", "10.0"))  # Simplified max delay
+    VOICE_STABILIZE_DELAY = float(os.getenv("VOICE_STABILIZE_DELAY", "1.0"))  # Reduced initial delay
     
     # Audio Settings
     AUDIO_BITRATE_BPS = int(os.getenv("AUDIO_BITRATE_BPS", "96000"))
