@@ -3599,15 +3599,16 @@ async def cleanup_all_rooms_command(interaction: discord.Interaction):
         )
 
 
-# Handle button interactions for joining rooms
+# Handle button interactions for joining rooms and starting playback
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
     """Handle button clicks and other interactions."""
     if interaction.type != discord.InteractionType.component:
         return
     
-    if interaction.data.get("custom_id", "").startswith("join_room:"):
-        room_id = interaction.data["custom_id"].split(":", 1)[1]
+    custom_id = interaction.data.get("custom_id", "")
+    if custom_id.startswith("join_room:"):
+        room_id = custom_id.split(":", 1)[1]
         
         # Check if user is already in a room
         current_room = room_manager.get_user_room(interaction.user.id)
@@ -3634,89 +3635,77 @@ async def on_interaction(interaction: discord.Interaction):
                 await interaction.response.send_message(f"❌ Failed to join room.", ephemeral=True)
             return
         
-    room = room_manager.get_room(room_id)
-    await interaction.response.send_message(
-        f"✅ Joined listening room for **{room.artist} - {room.album}**!\n\nVoice: {room.voice_channel.mention}\nChat: {room.text_channel.mention}",
-        ephemeral=True
-    )
-
-    # Phase 3: Grant this member access to private channels
-    # Following Discord best practices: explicit permission grants for private channels
-    try:
-        # Grant category access
-        await room.category.set_permissions(
-            interaction.user,
-            view_channel=True,
-            connect=True,
-            send_messages=True,
-            add_reactions=True
-        )
-        
-        # Grant text channel access
-        await room.text_channel.set_permissions(
-            interaction.user,
-            view_channel=True,
-            send_messages=True,
-            add_reactions=True
-        )
-        
-        # Grant voice channel access (users start muted but can unmute themselves)
-        await room.voice_channel.set_permissions(
-            interaction.user,
-            view_channel=True,
-            connect=True,
-            # Note: Not setting speak=False allows users to unmute themselves
-            # Discord will start them muted by default but they can toggle
-            use_voice_activation=True
-        )
-        
-        logger.info(f"Granted private channel access to {interaction.user.display_name} in room {room_id} (button)")
-        
-    except Exception as e:
-        logger.error(f"Failed to grant channel permissions to {interaction.user.display_name} (button): {e}")
-        # Don't fail the join if permission setting fails - they're already in the room
-
-    # Announce in the text channel
-    if room.text_channel:
-        await room.text_channel.send(f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})", allowed_mentions=discord.AllowedMentions.none())
-
-    elif interaction.data.get("custom_id", "").startswith("start_playback:"):
-        room_id = interaction.data["custom_id"].split(":", 1)[1]
         room = room_manager.get_room(room_id)
+        await interaction.response.send_message(
+            f"✅ Joined listening room for **{room.artist} - {room.album}**!\n\nVoice: {room.voice_channel.mention}\nChat: {room.text_channel.mention}",
+            ephemeral=True
+        )
         
+        # Grant this member access to private channels
+        try:
+            # Grant category access
+            await room.category.set_permissions(
+                interaction.user,
+                view_channel=True,
+                connect=True,
+                send_messages=True,
+                add_reactions=True
+            )
+            # Grant text channel access
+            await room.text_channel.set_permissions(
+                interaction.user,
+                view_channel=True,
+                send_messages=True,
+                add_reactions=True
+            )
+            # Grant voice channel access (users start muted but can unmute themselves)
+            await room.voice_channel.set_permissions(
+                interaction.user,
+                view_channel=True,
+                connect=True,
+                use_voice_activation=True
+            )
+            logger.info(f"Granted private channel access to {interaction.user.display_name} in room {room_id} (button)")
+        except Exception as e:
+            logger.error(f"Failed to grant channel permissions to {interaction.user.display_name} (button): {e}")
+        
+        # Announce in the text channel
+        if room.text_channel:
+            await room.text_channel.send(
+                f"👋 **{interaction.user.display_name}** joined the room! ({len(room.participants)}/{room.max_participants})",
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+        return
+    
+    if custom_id.startswith("start_playback:"):
+        room_id = custom_id.split(":", 1)[1]
+        room = room_manager.get_room(room_id)
         if not room:
             await interaction.response.send_message("❌ Room not found.", ephemeral=True)
             return
-            
         # Only host can start playback
         if interaction.user.id != room.host.id:
             await interaction.response.send_message("❌ Only the room host can start playback.", ephemeral=True)
             return
-            
         await interaction.response.defer()
-        
-        # Start playback
         success = await room.play_current_track()
         if success:
-            # Update to now playing interface
             now_playing_embed = await create_now_playing_embed(room)
             playback_controls = PlaybackControlView(room.room_id)
             await playback_controls.update_buttons(room)
-            
-            # Update the message to show now playing
             await interaction.edit_original_response(
                 content=f"🎵 **Now playing {room.artist} - {room.album}**",
                 embed=now_playing_embed,
                 view=playback_controls
             )
-            
-            # Update the stored message reference
             room.now_playing_message = await interaction.original_response()
-            
-            # Announce in chat
-            await room.text_channel.send(f"🎵 **{interaction.user.display_name}** started the listening party! **{room.current_track_info}**", allowed_mentions=discord.AllowedMentions.none())
+            await room.text_channel.send(
+                f"🎵 **{interaction.user.display_name}** started the listening party! **{room.current_track_info}**",
+                allowed_mentions=discord.AllowedMentions.none()
+            )
         else:
             await interaction.followup.send("❌ Failed to start playback. Try again or use `/play` command.", ephemeral=True)
+        return
 
 
 # ==================== PLAYBACK CONTROL COMMANDS ====================
