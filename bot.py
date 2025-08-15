@@ -384,13 +384,9 @@ class ListeningRoom:
                 try:
                     logger.info(f"Connection attempt {attempt}/{max_attempts}")
                     
-                    # Let Discord.py handle its own retries with longer timeout
-                    # This avoids conflicts between our retry logic and Discord.py's internal retries
-                    self.voice_client = await self.voice_channel.connect(
-                        reconnect=False,
-                        timeout=BotConstants.VOICE_CONNECT_TIMEOUT,  # Now 60s to allow Discord.py retries
-                        self_deaf=True
-                    )
+                    # Use IDENTICAL connection method to diagnostic test (which works)
+                    # Diagnostic uses: await test_voice.connect() with default parameters
+                    self.voice_client = await self.voice_channel.connect()
                     
                     # Wait for connection to stabilize
                     await asyncio.sleep(2.0)
@@ -3263,40 +3259,9 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                 logger.info(f"🔍 Voice channel @everyone can view: {voice_perms.view_channel}")
                 logger.info(f"🔍 Text channel @everyone can view: {text_perms.view_channel}")
                 
-                if voice_perms.view_channel or text_perms.view_channel:
-                    logger.warning("⚠️ Channels did not inherit privacy from category - applying directly")
-                    
-                    # Apply privacy directly to channels
-                    await room.voice_channel.set_permissions(
-                        interaction.guild.default_role,
-                        view_channel=False,
-                        connect=False
-                    )
-                    # Ensure bot has voice channel permissions
-                    await room.voice_channel.set_permissions(
-                        interaction.guild.me,
-                        view_channel=True,
-                        connect=True,
-                        speak=True,
-                        use_voice_activation=True,
-                        manage_channels=True,
-                        manage_permissions=True
-                    )
-                    
-                    await room.text_channel.set_permissions(
-                        interaction.guild.default_role,
-                        view_channel=False,
-                        send_messages=False
-                    )
-                    # Ensure bot has text channel permissions  
-                    await room.text_channel.set_permissions(
-                        interaction.guild.me,
-                        view_channel=True,
-                        send_messages=True,
-                        manage_channels=True,
-                        manage_permissions=True
-                    )
-                    logger.info("✅ Applied privacy settings directly to channels with bot permissions")
+                # SKIP privacy application here - channels SHOULD be public for voice connection
+                # Privacy will be applied AFTER voice connection succeeds
+                logger.info("⏭️ Channels remain public for stable voice connection - privacy applied later")
                 
             except Exception as e:
                 logger.error(f"❌ Failed to configure channel permissions: {e}")
