@@ -3202,13 +3202,22 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             
             # Determine an appropriate bitrate (Discord caps depend on server boost)
             bitrate_bps = BotConstants.AUDIO_BITRATE_BPS
+            # Create voice channel WITHOUT category first (like diagnostic test)
+            # This ensures cleanest possible channel creation for voice connection
             room.voice_channel = await interaction.guild.create_voice_channel(
                 name=voice_channel_name,
-                category=room.category,
                 user_limit=room.max_participants,
                 bitrate=bitrate_bps,
                 reason="Listening room created"
             )
+            
+            # Move to category after creation (if successful)
+            try:
+                await room.voice_channel.edit(category=room.category)
+                logger.info("Moved voice channel to category after creation")
+            except Exception as e:
+                logger.warning(f"Failed to move voice channel to category: {e}")
+                # Continue anyway - voice connection is more important
             
             # Create persistent text channel  
             text_channel_name = f"💬-{album.lower().replace(' ', '-')}-chat"
@@ -3381,6 +3390,10 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         
         # Update status: tracks loaded, now connecting to voice
         await loading_msg.edit(content="🎧 Tracks loaded! Connecting to voice channel...")
+        
+        # Wait for Discord channel propagation before attempting voice connection
+        # This prevents 4006 errors caused by connecting to channels too quickly after creation
+        await asyncio.sleep(3.0)
         
         # Connect to voice while channels are still public
         voice_connected = await room.connect_voice()
