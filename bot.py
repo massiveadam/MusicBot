@@ -1430,7 +1430,7 @@ async def run_gamdl(
     url: str,
     cookies_path: str = None,
     codec: str = None,
-    remux_mode: str = "mp4box",
+    remux_mode: str = "ffmpeg",
     output_path: str = None,
     high_quality: bool = False
 ) -> tuple[int, str]:
@@ -1484,8 +1484,6 @@ async def run_gamdl(
     # Add organized templates and sanity checks
     cmd_args.extend([
         "--template-folder-album", "{album_artist}/{album}",
-        "--exclude-tags", "false",
-        "--sanity-check", "true",
     ])
     
     cmd_args.append(url)
