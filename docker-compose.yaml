@@ -10,6 +10,9 @@ services:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - PLEX_TOKEN=${PLEX_TOKEN}
       - PLEX_URL=${PLEX_URL}
+      - PRIVATE_CREATE_FIRST=${PRIVATE_CREATE_FIRST:-true}
+      - DEFAULT_SILENT_ROOMS=${DEFAULT_SILENT_ROOMS:-true}
+      - VOICE_RTC_REGION=${VOICE_RTC_REGION:-us-east}
       - BEETS_WEB_ENABLED=true  # Optional: enable beets web interface
       - MUSIC_FOLDER=${MUSIC_FOLDER:-/music}
       - DOWNLOADS_FOLDER=${DOWNLOADS_FOLDER:-/downloads}
