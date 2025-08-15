@@ -3266,8 +3266,8 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         
         # Global voice lock: ensure only one room connects at a time to avoid gateway 4006
         async with room_manager._global_voice_lock:
-            # Wait briefly before connecting (still useful even in private-first mode)
-            await asyncio.sleep(1.5)
+            # Give the library more time to fully load/prep the album before connect
+            await asyncio.sleep(BotConstants.VOICE_PRECONNECT_DELAY)
         
         # Connect to voice while channels are still public
         voice_connected = await room.connect_voice()

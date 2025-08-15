@@ -21,6 +21,8 @@ class BotConstants:
     VOICE_STABILIZE_DELAY = float(os.getenv("VOICE_STABILIZE_DELAY", "1.0"))  # Reduced initial delay
     # Additional stabilization after library reports connection complete
     VOICE_POST_CONNECT_STABILIZE = float(os.getenv("VOICE_POST_CONNECT_STABILIZE", "2.5"))
+    # Delay between finishing track load and attempting voice connect
+    VOICE_PRECONNECT_DELAY = float(os.getenv("VOICE_PRECONNECT_DELAY", "3.0"))
     # Pin the RTC region to avoid region flaps during handshake (e.g., "us-east", "rotterdam"). Empty string = auto.
     VOICE_RTC_REGION = os.getenv("VOICE_RTC_REGION", "")
     # Optionally skip moving the voice channel into a category until after connection stabilizes
