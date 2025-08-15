@@ -370,7 +370,7 @@ class ListeningRoom:
             
             # Give a short stabilization window since the library logs "Voice connection complete"
             # just before the client is fully ready in rare cases.
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(BotConstants.VOICE_POST_CONNECT_STABILIZE)
             
             if self.voice_client and self.voice_client.is_connected():
                 logger.info(f"✅ Successfully connected to voice channel in room {self.room_id}")
@@ -3109,20 +3109,25 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             bitrate_bps = BotConstants.AUDIO_BITRATE_BPS
             # Create voice channel WITHOUT category first (like diagnostic test)
             # This ensures cleanest possible channel creation for voice connection
-            room.voice_channel = await interaction.guild.create_voice_channel(
-                name=voice_channel_name,
-                user_limit=room.max_participants,
-                bitrate=bitrate_bps,
-                reason="Listening room created"
-            )
+            # Also optionally pin RTC region to avoid region flaps during handshake
+            vc_kwargs = {
+                "name": voice_channel_name,
+                "user_limit": room.max_participants,
+                "bitrate": bitrate_bps,
+                "reason": "Listening room created",
+            }
+            if BotConstants.VOICE_RTC_REGION:
+                vc_kwargs["rtc_region"] = BotConstants.VOICE_RTC_REGION
+            room.voice_channel = await interaction.guild.create_voice_channel(**vc_kwargs)
             
-            # Move to category after creation (if successful)
-            try:
-                await room.voice_channel.edit(category=room.category)
-                logger.info("Moved voice channel to category after creation")
-            except Exception as e:
-                logger.warning(f"Failed to move voice channel to category: {e}")
-                # Continue anyway - voice connection is more important
+            # Optionally move to category after creation (can be skipped to avoid early state churn)
+            if not BotConstants.SKIP_VOICE_CATEGORY_MOVE:
+                try:
+                    await room.voice_channel.edit(category=room.category)
+                    logger.info("Moved voice channel to category after creation")
+                except Exception as e:
+                    logger.warning(f"Failed to move voice channel to category: {e}")
+                    # Continue anyway - voice connection is more important
             
             # Create persistent text channel  
             text_channel_name = f"💬-{album.lower().replace(' ', '-')}-chat"
@@ -3275,6 +3280,17 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             await loading_msg.edit(content="❌ Failed to connect to voice channel.")
             await room_manager.cleanup_room(room.room_id)
             return
+        
+        # Post-connect stabilization window before any channel moves/permission edits
+        await asyncio.sleep(BotConstants.VOICE_POST_CONNECT_STABILIZE)
+        
+        # If we skipped category move earlier, perform it now after connection is stable
+        if BotConstants.SKIP_VOICE_CATEGORY_MOVE:
+            try:
+                await room.voice_channel.edit(category=room.category)
+                logger.info("Moved voice channel to category after connect stabilization")
+            except Exception as e:
+                logger.warning(f"Deferred move to category failed: {e}")
         
         # Now make channels private AFTER successful voice connection
         await loading_msg.edit(content="🔒 Securing private channels...")

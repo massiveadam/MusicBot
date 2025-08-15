@@ -19,6 +19,12 @@ class BotConstants:
     VOICE_BASE_DELAY = float(os.getenv("VOICE_BASE_DELAY", "5.0"))  # Increased delay between our retries
     VOICE_MAX_DELAY = float(os.getenv("VOICE_MAX_DELAY", "10.0"))  # Simplified max delay
     VOICE_STABILIZE_DELAY = float(os.getenv("VOICE_STABILIZE_DELAY", "1.0"))  # Reduced initial delay
+    # Additional stabilization after library reports connection complete
+    VOICE_POST_CONNECT_STABILIZE = float(os.getenv("VOICE_POST_CONNECT_STABILIZE", "2.5"))
+    # Pin the RTC region to avoid region flaps during handshake (e.g., "us-east", "rotterdam"). Empty string = auto.
+    VOICE_RTC_REGION = os.getenv("VOICE_RTC_REGION", "")
+    # Optionally skip moving the voice channel into a category until after connection stabilizes
+    SKIP_VOICE_CATEGORY_MOVE = os.getenv("SKIP_VOICE_CATEGORY_MOVE", "false").lower() in ("1", "true", "yes")
     
     # Audio Settings
     AUDIO_BITRATE_BPS = int(os.getenv("AUDIO_BITRATE_BPS", "96000"))
