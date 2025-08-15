@@ -1483,8 +1483,7 @@ async def run_gamdl(
     
     # Add organized templates and sanity checks
     cmd_args.extend([
-        "--template-folder", "{album_artist}/{album}",
-        "--template-file", "{track:02d} {title}",
+        "--template-folder-album", "{album_artist}/{album}",
         "--exclude-tags", "false",
         "--sanity-check", "true",
     ])
