@@ -351,133 +351,38 @@ class ListeningRoom:
             return False
     
     async def connect_voice(self) -> bool:
-        """Connect to the voice channel with robust retry logic."""
+        """Connect to voice channel using Discord.py's built-in retry system (matches /diagnose)"""
         if not self.voice_channel:
             logger.error("No voice channel to connect to")
             return False
             
+        # Check if already connected
+        if self.voice_client and self.voice_client.is_connected():
+            logger.info(f"Already connected to voice channel in room {self.room_id}")
+            return True
+            
         try:
-            # Serialize connects per room to avoid concurrent handshakes (can cause 4006)
-            if hasattr(self, "_connecting") and self._connecting:
-                # Wait briefly for existing connect to finish
-                for _ in range(10):
-                    await asyncio.sleep(0.3)
-                    if not getattr(self, "_connecting", False):
-                        break
-            async with self._connect_lock:
-                self._connecting = True
-            # Check if already connected
-            if self.voice_client and self.voice_client.is_connected():
-                logger.info(f"Already connected to voice channel in room {self.room_id}")
-                self._connecting = False
-                return True
-                
             logger.info(f"Connecting to voice channel: {self.voice_channel.name}")
             
-            # Robust connection with manual retry strategy only (disable library auto-retry)
-            max_attempts = BotConstants.VOICE_RETRY_ATTEMPTS
-            base_delay = BotConstants.VOICE_BASE_DELAY
-            # Small initial jitter helps avoid immediate 4006 after channel creation
-            await asyncio.sleep(BotConstants.VOICE_STABILIZE_DELAY)
+            # Use IDENTICAL method to /diagnose (which works) - let Discord.py handle all retries
+            # NO manual retries - this prevents double retry conflicts that cause 4006 errors
+            self.voice_client = await self.voice_channel.connect()
             
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    logger.info(f"Connection attempt {attempt}/{max_attempts}")
-                    
-                    # Use IDENTICAL connection method to diagnostic test (which works)
-                    # Diagnostic uses: await test_voice.connect() with default parameters
-                    self.voice_client = await self.voice_channel.connect()
-                    
-                    # Wait for connection to stabilize
-                    await asyncio.sleep(2.0)
-                    
-                    if self.voice_client and self.voice_client.is_connected():
-                        logger.info(f"Successfully connected to voice channel in room {self.room_id}")
-                        self._connecting = False
-                        return True
-                    else:
-                        logger.warning(f"Voice client not connected after attempt {attempt}")
-                        if self.voice_client:
-                            await self.voice_client.disconnect()
-                            self.voice_client = None
+            if self.voice_client and self.voice_client.is_connected():
+                logger.info(f"✅ Successfully connected to voice channel in room {self.room_id}")
+                return True
+            else:
+                logger.error("❌ Voice connection failed - client not connected")
+                return False
                         
-                except discord.errors.ConnectionClosed as e:
-                    code = getattr(e, 'code', None)
-                    logger.error(f"Discord connection closed with code {code} (attempt {attempt}): {e}")
-                    # 4006 session timeout: fully reset client and backoff
-                    if code == 4006:
-                        # On later attempts, recreate a fresh voice channel to avoid bad server affinity
-                        if attempt >= 6 and self.voice_channel:
-                            try:
-                                old = self.voice_channel
-                                new_name = f"{old.name}"
-                                new_vc = await old.guild.create_voice_channel(
-                                    name=new_name,
-                                    category=old.category,
-                                    user_limit=old.user_limit,
-                                    bitrate=old.bitrate,
-                                    overwrites=old.overwrites,
-                                    reason="Recreate channel to recover from voice 4006"
-                                )
-                                # Swap
-                                self.voice_channel = new_vc
-                                try:
-                                    await old.delete(reason="Replacing due to voice 4006")
-                                except Exception:
-                                    pass
-                                # Give Discord a moment to propagate the new channel
-                                await asyncio.sleep(2.0)
-                            except Exception as ce:
-                                logger.error(f"Failed to recreate voice channel: {ce}")
-                        if self.voice_client:
-                            try:
-                                await self.voice_client.disconnect(force=True)
-                            except Exception:
-                                pass
-                            self.voice_client = None
-                        delay = min(BotConstants.VOICE_MAX_DELAY, base_delay * (2 ** (attempt - 1)))
-                        logger.info(f"Waiting {delay}s before retry...")
-                        await asyncio.sleep(delay)
-                        continue
-                    return False
-                        
-                except discord.errors.ClientException as e:
-                    if "Already connected to a voice channel" in str(e):
-                        logger.info("Already connected to voice channel")
-                        return True
-                    else:
-                        logger.error(f"Discord client exception (attempt {attempt}): {e}")
-                        if attempt == max_attempts:
-                            return False
-                        await asyncio.sleep(base_delay)
-                        continue
-                        
-                except asyncio.TimeoutError:
-                    logger.error(f"Voice connect timed out (attempt {attempt})")
-                    if self.voice_client:
-                        try:
-                            await self.voice_client.disconnect(force=True)
-                        except Exception:
-                            pass
-                        self.voice_client = None
-                    await asyncio.sleep(base_delay * attempt)
-                    continue
-
-                except Exception as e:
-                    logger.error(f"Unexpected error during voice connection (attempt {attempt}): {type(e).__name__}: {e}")
-                    if attempt == max_attempts:
-                        self._connecting = False
-                        return False
-                    await asyncio.sleep(base_delay)
-                    continue
-            
-            logger.error(f"Failed to connect after {max_attempts} attempts")
-            self._connecting = False
-            return False
-            
         except Exception as e:
-            logger.error(f"Failed to connect to voice channel: {type(e).__name__}: {e}")
-            self._connecting = False
+            logger.error(f"❌ Voice connection failed: {type(e).__name__}: {e}")
+            if self.voice_client:
+                try:
+                    await self.voice_client.disconnect(force=True)
+                except:
+                    pass
+                self.voice_client = None
             return False
     
     async def disconnect_voice(self):
