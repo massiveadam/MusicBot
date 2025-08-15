@@ -368,6 +368,10 @@ class ListeningRoom:
             # NO manual retries - this prevents double retry conflicts that cause 4006 errors
             self.voice_client = await self.voice_channel.connect()
             
+            # Give a short stabilization window since the library logs "Voice connection complete"
+            # just before the client is fully ready in rare cases.
+            await asyncio.sleep(1.0)
+            
             if self.voice_client and self.voice_client.is_connected():
                 logger.info(f"✅ Successfully connected to voice channel in room {self.room_id}")
                 return True
