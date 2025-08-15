@@ -288,6 +288,7 @@ class ListeningRoom:
         self._manual_stop_flag = False  # Flag to prevent auto-advance after manual stop
         self.temp_dir = None  # For Apple Music downloads
         self._connect_lock = asyncio.Lock()  # Lock for connection synchronization
+        self.handshake_active: bool = False  # Gate permission edits during voice handshake
         
         # Created timestamp
         self.created_at = time.time()
@@ -366,7 +367,8 @@ class ListeningRoom:
             
             # Use IDENTICAL method to /diagnose (which works) - let Discord.py handle all retries
             # NO manual retries - this prevents double retry conflicts that cause 4006 errors
-            self.voice_client = await self.voice_channel.connect()
+            self.handshake_active = True
+            self.voice_client = await self.voice_channel.connect(self_deaf=True)
             
             # Give a short stabilization window since the library logs "Voice connection complete"
             # just before the client is fully ready in rare cases.
@@ -388,6 +390,8 @@ class ListeningRoom:
                     pass
                 self.voice_client = None
             return False
+        finally:
+            self.handshake_active = False
     
     async def disconnect_voice(self):
         """Disconnect from voice channel."""
@@ -3285,7 +3289,8 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         await asyncio.sleep(BotConstants.VOICE_POST_CONNECT_STABILIZE)
         
         # If we skipped category move earlier, perform it now after connection is stable
-        if BotConstants.SKIP_VOICE_CATEGORY_MOVE:
+        # Avoid moving while a handshake is active
+        if BotConstants.SKIP_VOICE_CATEGORY_MOVE and not room.handshake_active:
             try:
                 await room.voice_channel.edit(category=room.category)
                 logger.info("Moved voice channel to category after connect stabilization")
@@ -3296,26 +3301,57 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         await loading_msg.edit(content="🔒 Securing private channels...")
         
         try:
-            # Apply privacy settings after voice connection is stable
+            # First, explicitly allow the bot on category, voice and text
+            bot_member = interaction.guild.me
+            await room.category.set_permissions(
+                bot_member,
+                view_channel=True,
+                manage_channels=True,
+                manage_permissions=True,
+                connect=True,
+                send_messages=True,
+                add_reactions=True,
+                speak=True,
+                use_voice_activation=True,
+            )
+            await room.voice_channel.set_permissions(
+                bot_member,
+                view_channel=True,
+                connect=True,
+                speak=True,
+                use_voice_activation=True,
+                manage_channels=True,
+                manage_permissions=True,
+            )
+            await room.text_channel.set_permissions(
+                bot_member,
+                view_channel=True,
+                send_messages=True,
+                manage_channels=True,
+                manage_permissions=True,
+            )
+            
+            # Small delay to let overwrites propagate before applying @everyone denies
+            await asyncio.sleep(0.5)
+            
+            # Apply @everyone denies for privacy
             await room.category.set_permissions(
                 interaction.guild.default_role,
                 view_channel=False,
                 connect=False,
                 send_messages=False,
                 add_reactions=False,
-                mention_everyone=False
+                mention_everyone=False,
             )
-            
             await room.voice_channel.set_permissions(
                 interaction.guild.default_role,
                 view_channel=False,
-                connect=False
+                connect=False,
             )
-            
             await room.text_channel.set_permissions(
                 interaction.guild.default_role,
                 view_channel=False,
-                send_messages=False
+                send_messages=False,
             )
             
             logger.info("Successfully applied privacy settings after voice connection")
