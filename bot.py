@@ -3163,29 +3163,8 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             if BotConstants.VOICE_RTC_REGION:
                 vc_kwargs["rtc_region"] = BotConstants.VOICE_RTC_REGION
             if BotConstants.PRIVATE_CREATE_FIRST:
-                # Align with diagnostic: add explicit overwrites on the voice channel
-                bot_member = interaction.guild.me
+                # Rely on category-level overwrites to avoid per-channel churn
                 vc_kwargs["category"] = room.category
-                vc_kwargs["overwrites"] = {
-                    interaction.guild.default_role: discord.PermissionOverwrite(
-                        view_channel=False,
-                        connect=False,
-                    ),
-                    bot_member: discord.PermissionOverwrite(
-                        view_channel=True,
-                        connect=True,
-                        speak=True,
-                        use_voice_activation=True,
-                        manage_channels=True,
-                        manage_permissions=True,
-                    ),
-                    interaction.user: discord.PermissionOverwrite(
-                        view_channel=True,
-                        connect=True,
-                        speak=True,
-                        use_voice_activation=True,
-                    ),
-                }
             room.voice_channel = await interaction.guild.create_voice_channel(**vc_kwargs)
             
             # Create persistent text channel  
@@ -3285,8 +3264,10 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         # Update status: tracks loaded, now connecting to voice
         await loading_msg.edit(content="🎧 Tracks loaded! Connecting to voice channel...")
         
-        # Wait briefly before connecting (still useful even in private-first mode)
-        await asyncio.sleep(1.5)
+        # Global voice lock: ensure only one room connects at a time to avoid gateway 4006
+        async with room_manager._global_voice_lock:
+            # Wait briefly before connecting (still useful even in private-first mode)
+            await asyncio.sleep(1.5)
         
         # Connect to voice while channels are still public
         voice_connected = await room.connect_voice()
