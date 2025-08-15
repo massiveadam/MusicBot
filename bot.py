@@ -3163,7 +3163,29 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             if BotConstants.VOICE_RTC_REGION:
                 vc_kwargs["rtc_region"] = BotConstants.VOICE_RTC_REGION
             if BotConstants.PRIVATE_CREATE_FIRST:
+                # Align with diagnostic: add explicit overwrites on the voice channel
+                bot_member = interaction.guild.me
                 vc_kwargs["category"] = room.category
+                vc_kwargs["overwrites"] = {
+                    interaction.guild.default_role: discord.PermissionOverwrite(
+                        view_channel=False,
+                        connect=False,
+                    ),
+                    bot_member: discord.PermissionOverwrite(
+                        view_channel=True,
+                        connect=True,
+                        speak=True,
+                        use_voice_activation=True,
+                        manage_channels=True,
+                        manage_permissions=True,
+                    ),
+                    interaction.user: discord.PermissionOverwrite(
+                        view_channel=True,
+                        connect=True,
+                        speak=True,
+                        use_voice_activation=True,
+                    ),
+                }
             room.voice_channel = await interaction.guild.create_voice_channel(**vc_kwargs)
             
             # Create persistent text channel  
@@ -3605,6 +3627,15 @@ async def on_interaction(interaction: discord.Interaction):
     
     custom_id = interaction.data.get("custom_id", "")
     if custom_id.startswith("join_room:"):
+        # If the target room is mid-handshake, delay handling to avoid 4006 due to concurrent state churn
+        try:
+            target_room_id = custom_id.split(":", 1)[1]
+            target_room = room_manager.get_room(target_room_id)
+            if target_room and getattr(target_room, "handshake_active", False):
+                await interaction.response.send_message("⏳ Please wait a moment while the room finishes connecting...", ephemeral=True)
+                return
+        except Exception:
+            pass
         room_id = custom_id.split(":", 1)[1]
         
         # Check if user is already in a room
