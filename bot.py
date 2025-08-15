@@ -3167,54 +3167,9 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             # Phase 2: Apply privacy settings after successful creation
             logger.info("Applying privacy settings to category")
             
-            try:
-                # Make category private by default
-                logger.info("Setting @everyone permissions to deny view_channel")
-                await room.category.set_permissions(
-                    interaction.guild.default_role,
-                    view_channel=False,
-                    connect=False,
-                    send_messages=False,
-                    add_reactions=False,
-                    mention_everyone=False
-                )
-                logger.info("✅ @everyone permissions set successfully")
-                
-                # Grant bot full permissions
-                logger.info("Setting bot permissions")
-                await room.category.set_permissions(
-                    interaction.guild.me,
-                    view_channel=True,
-                    manage_channels=True,
-                    manage_permissions=True,
-                    connect=True,
-                    speak=True,
-                    send_messages=True,
-                    mention_everyone=True
-                )
-                logger.info("✅ Bot permissions set successfully")
-                
-                # Grant creator full access to category
-                logger.info("Setting creator permissions")
-                await room.category.set_permissions(
-                    interaction.user,
-                    view_channel=True,
-                    connect=True,
-                    speak=True,
-                    use_voice_activation=True,
-                    send_messages=True,
-                    add_reactions=True,
-                    mention_everyone=True
-                )
-                logger.info("✅ Creator permissions set successfully")
-                
-                logger.info("✅ All category privacy settings applied successfully")
-                
-            except Exception as e:
-                logger.error(f"❌ Failed to apply privacy settings to category: {e}")
-                logger.error(f"Category ID: {room.category.id}")
-                logger.error(f"Bot permissions in category: {room.category.permissions_for(interaction.guild.me)}")
-                # Continue anyway - channels might still work
+            # Skip privacy settings during creation - will apply after voice connection
+            # This avoids Discord session validation issues with complex permission overwrites
+            logger.info("Category created as public - will secure after voice connection")
             
         except Exception as e:
             logger.error(f"Failed to create category: {e}")
@@ -3242,38 +3197,25 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         voice_channel_name = f"🎵 {album} - {interaction.user.display_name}"
         
         try:
-            # Phase 1: Create channels with minimal bot-only permissions
-            # Channels will inherit privacy from the category we just configured
-            bot_only_overwrites = {
-                interaction.guild.me: discord.PermissionOverwrite(
-                    speak=True,
-                    connect=True,
-                    use_voice_activation=True,
-                    manage_channels=True,
-                    manage_permissions=True,
-                    send_messages=True,
-                    view_channel=True
-                )
-            }
+            # Create channels with NO permission overwrites initially (public)
+            # This avoids Discord session validation issues during voice connection
             
             # Determine an appropriate bitrate (Discord caps depend on server boost)
             bitrate_bps = BotConstants.AUDIO_BITRATE_BPS
             room.voice_channel = await interaction.guild.create_voice_channel(
                 name=voice_channel_name,
-                category=room.category,  # Inherits privacy from category
+                category=room.category,
                 user_limit=room.max_participants,
                 bitrate=bitrate_bps,
-                overwrites=bot_only_overwrites,
                 reason="Listening room created"
             )
             
-            # Create persistent text channel
+            # Create persistent text channel  
             text_channel_name = f"💬-{album.lower().replace(' ', '-')}-chat"
             room.text_channel = await interaction.guild.create_text_channel(
                 name=text_channel_name,
-                category=room.category,  # Inherits privacy from category
+                category=room.category,
                 topic=f"Chat for listening to {artist} - {album} | Room ID: {room.room_id}",
-                overwrites=bot_only_overwrites,
                 reason="Listening room created"
             )
 
@@ -3427,24 +3369,59 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         # Suppress mentions to avoid pings/notifications
         await room.text_channel.send(welcome_msg, allowed_mentions=discord.AllowedMentions.none())
         
-        # Connect to voice channel first (bot joins and waits quietly)
-        loading_msg = await room.text_channel.send("🎧 Connecting to voice channel...", allowed_mentions=discord.AllowedMentions.none())
+        # Load tracks first while channels are still public (easier voice connection)
+        loading_msg = await room.text_channel.send("📀 Loading tracks...", allowed_mentions=discord.AllowedMentions.none())
         
+        # Load album tracks while channels are public
+        tracks_loaded = await room.load_tracks()
+        if not tracks_loaded:
+            await loading_msg.edit(content="❌ Failed to load tracks for this album.")
+            await room_manager.cleanup_room(room.room_id)
+            return
+        
+        # Update status: tracks loaded, now connecting to voice
+        await loading_msg.edit(content="🎧 Tracks loaded! Connecting to voice channel...")
+        
+        # Connect to voice while channels are still public
         voice_connected = await room.connect_voice()
         if not voice_connected:
             await loading_msg.edit(content="❌ Failed to connect to voice channel.")
             await room_manager.cleanup_room(room.room_id)
             return
         
-        # Update status: connected, now loading tracks
-        await loading_msg.edit(content="📀 Connected! Loading tracks...")
+        # Now make channels private AFTER successful voice connection
+        await loading_msg.edit(content="🔒 Securing private channels...")
         
-        # Load album tracks while connected to voice
-        tracks_loaded = await room.load_tracks()
-        if not tracks_loaded:
-            await loading_msg.edit(content="❌ Failed to load tracks for this album.")
-            await room_manager.cleanup_room(room.room_id)
-            return
+        try:
+            # Apply privacy settings after voice connection is stable
+            await room.category.set_permissions(
+                interaction.guild.default_role,
+                view_channel=False,
+                connect=False,
+                send_messages=False,
+                add_reactions=False,
+                mention_everyone=False
+            )
+            
+            await room.voice_channel.set_permissions(
+                interaction.guild.default_role,
+                view_channel=False,
+                connect=False
+            )
+            
+            await room.text_channel.set_permissions(
+                interaction.guild.default_role,
+                view_channel=False,
+                send_messages=False
+            )
+            
+            logger.info("Successfully applied privacy settings after voice connection")
+            
+        except Exception as e:
+            logger.error(f"Failed to apply privacy settings: {e}")
+            # Continue anyway - voice connection is working
+        
+
         
         # Update status: ready to play
         await loading_msg.edit(content="✅ Ready! Starting playback...")
