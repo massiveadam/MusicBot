@@ -3085,34 +3085,48 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         # Create a category for this listening room
         category_name = f"🎵 {album} - {interaction.user.display_name}"
         try:
-            # Try simplified approach first - no overwrites at creation
             logger.info(f"Attempting to create category: {category_name}")
+            bot_member = interaction.guild.me
+            overwrites = None
+            if BotConstants.PRIVATE_CREATE_FIRST:
+                # Private-first: allow bot+host, deny everyone
+                overwrites = {
+                    interaction.guild.default_role: discord.PermissionOverwrite(
+                        view_channel=False,
+                        connect=False,
+                        send_messages=False,
+                        add_reactions=False,
+                        mention_everyone=False,
+                    ),
+                    bot_member: discord.PermissionOverwrite(
+                        view_channel=True,
+                        manage_channels=True,
+                        manage_permissions=True,
+                        connect=True,
+                        send_messages=True,
+                        add_reactions=True,
+                        speak=True,
+                        use_voice_activation=True,
+                    ),
+                    interaction.user: discord.PermissionOverwrite(
+                        view_channel=True,
+                        connect=True,
+                        send_messages=True,
+                        add_reactions=True,
+                        speak=True,
+                        use_voice_activation=True,
+                    ),
+                }
             
-            try:
-                # Method 1: Minimal creation with no overwrites (most compatible)
-                room.category = await interaction.guild.create_category(
-                    name=category_name,
-                    reason="Listening room category created"
-                )
-                logger.info(f"Category created successfully: {room.category.id}")
-                
-            except discord.Forbidden:
-                # Method 2: Try with Administrator permission if available
-                if interaction.guild.me.guild_permissions.administrator:
-                    logger.info("Retrying category creation with admin permissions")
-                    room.category = await interaction.guild.create_category(
-                        name=category_name,
-                        reason="Listening room category created (admin retry)"
-                    )
-                else:
-                    raise
+            room.category = await interaction.guild.create_category(
+                name=category_name,
+                overwrites=overwrites,
+                reason="Listening room category created"
+            )
+            logger.info(f"Category created successfully: {room.category.id}")
             
-            # Phase 2: Apply privacy settings after successful creation
-            logger.info("Applying privacy settings to category")
-            
-            # Skip privacy settings during creation - will apply after voice connection
-            # This avoids Discord session validation issues with complex permission overwrites
-            logger.info("Category created as public - will secure after voice connection")
+            if not BotConstants.PRIVATE_CREATE_FIRST:
+                logger.info("Category created as public - will secure after voice connection")
             
         except Exception as e:
             logger.error(f"Failed to create category: {e}")
@@ -3136,18 +3150,13 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             await interaction.followup.send("❌ Failed to create listening room category. Check bot permissions and role hierarchy.")
             return
         
-        # Create voice channel
+        # Create voice channel (inside category if private-first)
         voice_channel_name = f"🎵 {album} - {interaction.user.display_name}"
         
         try:
-            # Create channels with NO permission overwrites initially (public)
-            # This avoids Discord session validation issues during voice connection
-            
             # Determine an appropriate bitrate (Discord caps depend on server boost)
             bitrate_bps = BotConstants.AUDIO_BITRATE_BPS
-            # Create voice channel WITHOUT category first (like diagnostic test)
-            # This ensures cleanest possible channel creation for voice connection
-            # Also optionally pin RTC region to avoid region flaps during handshake
+            # Optionally pin RTC region to avoid region flaps during handshake
             vc_kwargs = {
                 "name": voice_channel_name,
                 "user_limit": room.max_participants,
@@ -3156,25 +3165,19 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             }
             if BotConstants.VOICE_RTC_REGION:
                 vc_kwargs["rtc_region"] = BotConstants.VOICE_RTC_REGION
+            if BotConstants.PRIVATE_CREATE_FIRST:
+                vc_kwargs["category"] = room.category
             room.voice_channel = await interaction.guild.create_voice_channel(**vc_kwargs)
-            
-            # Optionally move to category after creation (can be skipped to avoid early state churn)
-            if not BotConstants.SKIP_VOICE_CATEGORY_MOVE:
-                try:
-                    await room.voice_channel.edit(category=room.category)
-                    logger.info("Moved voice channel to category after creation")
-                except Exception as e:
-                    logger.warning(f"Failed to move voice channel to category: {e}")
-                    # Continue anyway - voice connection is more important
             
             # Create persistent text channel  
             text_channel_name = f"💬-{album.lower().replace(' ', '-')}-chat"
-            room.text_channel = await interaction.guild.create_text_channel(
+            tc_kwargs = dict(
                 name=text_channel_name,
                 category=room.category,
                 topic=f"Chat for listening to {artist} - {album} | Room ID: {room.room_id}",
                 reason="Listening room created"
             )
+            room.text_channel = await interaction.guild.create_text_channel(**tc_kwargs)
 
             # Phase 2: Configure voice-specific permissions after creation
             logger.info("Configuring channel-specific permissions")
@@ -3199,21 +3202,17 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
                     interaction.user,
                     view_channel=True,
                     send_messages=True,
-                    add_reactions=True,
-                    mention_everyone=True
+                    add_reactions=True
                 )
                 logger.info("✅ Text channel creator permissions set")
                 
-                # Verify that channels inherited category privacy
-                voice_perms = room.voice_channel.permissions_for(interaction.guild.default_role)
-                text_perms = room.text_channel.permissions_for(interaction.guild.default_role)
-                
-                logger.info(f"🔍 Voice channel @everyone can view: {voice_perms.view_channel}")
-                logger.info(f"🔍 Text channel @everyone can view: {text_perms.view_channel}")
-                
-                # SKIP privacy application here - channels SHOULD be public for voice connection
-                # Privacy will be applied AFTER voice connection succeeds
-                logger.info("⏭️ Channels remain public for stable voice connection - privacy applied later")
+                if not BotConstants.PRIVATE_CREATE_FIRST:
+                    # Only relevant when category is public-first
+                    voice_perms = room.voice_channel.permissions_for(interaction.guild.default_role)
+                    text_perms = room.text_channel.permissions_for(interaction.guild.default_role)
+                    logger.info(f"🔍 Voice channel @everyone can view: {voice_perms.view_channel}")
+                    logger.info(f"🔍 Text channel @everyone can view: {text_perms.view_channel}")
+                    logger.info("⏭️ Channels remain public for stable voice connection - privacy applied later")
                 
             except Exception as e:
                 logger.error(f"❌ Failed to configure channel permissions: {e}")
@@ -3232,59 +3231,18 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             await interaction.followup.send("❌ Failed to create voice/text channels.")
             return
         
-        # Create room announcement embed
-        embed = discord.Embed(
-            title=f"🎵 Listening Room Created",
-            description=f"**{artist} - {album}**\n\nRoom ID: `{room.room_id}`\n\nAnyone can join and control the music!\n🔇 *Mics muted by default for focused listening*\n🔕 *Notifications muted for everyone except the room creator*",
-            color=discord.Color.purple()
-        )
-        embed.add_field(
-            name="📁 Category", 
-            value=room.category.mention, 
-            inline=True
-        )
-        embed.add_field(
-            name="🎧 Voice Channel", 
-            value=room.voice_channel.mention, 
-            inline=True
-        )
-        embed.add_field(
-            name="💬 Chat Channel", 
-            value=room.text_channel.mention, 
-            inline=True
-        )
-        embed.add_field(
-            name="👥 Participants", 
-            value=f"1/{room.max_participants}", 
-            inline=True
-        )
-        embed.set_footer(text=f"Host: {interaction.user.display_name}")
-        
-        # Create join button
-        view = discord.ui.View()
-        join_button = discord.ui.Button(
-            label="🎧 Join Room",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"join_room:{room.room_id}"
-        )
-        view.add_item(join_button)
-        
-        # Send response based on silent mode
-        if silent:
-            # Silent mode: only creator sees the response
+        # Response: default to silent rooms if configured
+        if silent or BotConstants.DEFAULT_SILENT_ROOMS:
             await interaction.followup.send(
-                f"🔇 **Silent room created!**\n\n"
+                f"🔇 **Room created!**\n\n"
                 f"**{artist} - {album}**\n"
                 f"Room ID: `{room.room_id}`\n"
                 f"Category: {room.category.mention}\n"
                 f"Voice: {room.voice_channel.mention}\n"
                 f"Chat: {room.text_channel.mention}\n\n"
-                f"Share the room ID or channels privately!",
+                f"Share the room ID or invite privately.",
                 ephemeral=True
             )
-        else:
-            # Public mode: everyone can see, but no pings/notifications
-            await interaction.followup.send(embed=embed, view=view)
         
         # Send initial message to the text channel (with notification suppression)
         welcome_msg = f"🎵 **Welcome to the listening room for {artist} - {album}!**\n\n"
@@ -3308,9 +3266,8 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
         # Update status: tracks loaded, now connecting to voice
         await loading_msg.edit(content="🎧 Tracks loaded! Connecting to voice channel...")
         
-        # Wait for Discord channel propagation before attempting voice connection
-        # This prevents 4006 errors caused by connecting to channels too quickly after creation
-        await asyncio.sleep(3.0)
+        # Wait briefly before connecting (still useful even in private-first mode)
+        await asyncio.sleep(1.5)
         
         # Connect to voice while channels are still public
         voice_connected = await room.connect_voice()
@@ -3331,68 +3288,61 @@ async def golive(interaction: discord.Interaction, source: str, album_name: str 
             except Exception as e:
                 logger.warning(f"Deferred move to category failed: {e}")
         
-        # Now make channels private AFTER successful voice connection
-        await loading_msg.edit(content="🔒 Securing private channels...")
-        
-        try:
-            # First, explicitly allow the bot on category, voice and text
-            bot_member = interaction.guild.me
-            await room.category.set_permissions(
-                bot_member,
-                view_channel=True,
-                manage_channels=True,
-                manage_permissions=True,
-                connect=True,
-                send_messages=True,
-                add_reactions=True,
-                speak=True,
-                use_voice_activation=True,
-            )
-            await room.voice_channel.set_permissions(
-                bot_member,
-                view_channel=True,
-                connect=True,
-                speak=True,
-                use_voice_activation=True,
-                manage_channels=True,
-                manage_permissions=True,
-            )
-            await room.text_channel.set_permissions(
-                bot_member,
-                view_channel=True,
-                send_messages=True,
-                manage_channels=True,
-                manage_permissions=True,
-            )
-            
-            # Small delay to let overwrites propagate before applying @everyone denies
-            await asyncio.sleep(0.5)
-            
-            # Apply @everyone denies for privacy
-            await room.category.set_permissions(
-                interaction.guild.default_role,
-                view_channel=False,
-                connect=False,
-                send_messages=False,
-                add_reactions=False,
-                mention_everyone=False,
-            )
-            await room.voice_channel.set_permissions(
-                interaction.guild.default_role,
-                view_channel=False,
-                connect=False,
-            )
-            await room.text_channel.set_permissions(
-                interaction.guild.default_role,
-                view_channel=False,
-                send_messages=False,
-            )
-            
-            logger.info("Successfully applied privacy settings after voice connection")
-            
-        except Exception as e:
-            logger.error(f"Failed to apply privacy settings: {e}")
-            # Continue anyway - voice connection is working
+        # Now apply privacy only if we did public-first
+        if not BotConstants.PRIVATE_CREATE_FIRST:
+            await loading_msg.edit(content="🔒 Securing private channels...")
+            try:
+                # First, explicitly allow the bot on category, voice and text
+                bot_member = interaction.guild.me
+                await room.category.set_permissions(
+                    bot_member,
+                    view_channel=True,
+                    manage_channels=True,
+                    manage_permissions=True,
+                    connect=True,
+                    send_messages=True,
+                    add_reactions=True,
+                    speak=True,
+                    use_voice_activation=True,
+                )
+                await room.voice_channel.set_permissions(
+                    bot_member,
+                    view_channel=True,
+                    connect=True,
+                    speak=True,
+                    use_voice_activation=True,
+                    manage_channels=True,
+                    manage_permissions=True,
+                )
+                await room.text_channel.set_permissions(
+                    bot_member,
+                    view_channel=True,
+                    send_messages=True,
+                    manage_channels=True,
+                    manage_permissions=True,
+                )
+                await asyncio.sleep(0.5)
+                await room.category.set_permissions(
+                    interaction.guild.default_role,
+                    view_channel=False,
+                    connect=False,
+                    send_messages=False,
+                    add_reactions=False,
+                    mention_everyone=False,
+                )
+                await room.voice_channel.set_permissions(
+                    interaction.guild.default_role,
+                    view_channel=False,
+                    connect=False,
+                )
+                await room.text_channel.set_permissions(
+                    interaction.guild.default_role,
+                    view_channel=False,
+                    send_messages=False,
+                )
+                logger.info("Successfully applied privacy settings after voice connection")
+            except Exception as e:
+                logger.error(f"Failed to apply privacy settings: {e}")
         
 
         

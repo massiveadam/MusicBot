@@ -25,6 +25,10 @@ class BotConstants:
     VOICE_RTC_REGION = os.getenv("VOICE_RTC_REGION", "")
     # Optionally skip moving the voice channel into a category until after connection stabilizes
     SKIP_VOICE_CATEGORY_MOVE = os.getenv("SKIP_VOICE_CATEGORY_MOVE", "false").lower() in ("1", "true", "yes")
+    # Create private category first with overwrites (bot+host allowed, @everyone denied)
+    PRIVATE_CREATE_FIRST = os.getenv("PRIVATE_CREATE_FIRST", "true").lower() in ("1", "true", "yes")
+    # Default to silent rooms (ephemeral confirmation) unless explicitly overridden
+    DEFAULT_SILENT_ROOMS = os.getenv("DEFAULT_SILENT_ROOMS", "true").lower() in ("1", "true", "yes")
     
     # Audio Settings
     AUDIO_BITRATE_BPS = int(os.getenv("AUDIO_BITRATE_BPS", "96000"))
