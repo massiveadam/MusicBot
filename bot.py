@@ -72,7 +72,7 @@ class Config:
         self.COOKIES_PATH = os.getenv("COOKIES_PATH", "/app/cookies.txt")
         self.DOWNLOAD_TIMEOUT = BotConstants.DOWNLOAD_TIMEOUT
         self.RETRY_ATTEMPTS = BotConstants.RETRY_ATTEMPTS
-        self.HIGH_QUALITY_AUDIO = os.getenv("HIGH_QUALITY_AUDIO", "true").lower() == "true"
+        self.HIGH_QUALITY_AUDIO = os.getenv("HIGH_QUALITY_AUDIO", "false").lower() == "true"
         self.AUDIO_BITRATE = BotConstants.AUDIO_BITRATE_BPS // 1000  # Convert to kbps
         
         # Scrobbling configuration
@@ -1432,40 +1432,66 @@ async def run_gamdl(
     codec: str = None,
     remux_mode: str = "mp4box",
     output_path: str = None,
-    high_quality: bool = True
+    high_quality: bool = False
 ) -> tuple[int, str]:
     """Run gamdl with highest quality settings for listening rooms"""
     cookies_path = cookies_path or config.COOKIES_PATH
     output_path = output_path or config.DOWNLOADS_FOLDER
+
+    # Resolve cookies.txt path robustly across environments (Docker, local, Windows)
+    resolved_cookies_path = None
+    try:
+        candidate_paths = [
+            cookies_path,
+            os.path.join(os.getcwd(), "cookies.txt"),
+            os.path.join(os.path.dirname(__file__), "cookies.txt"),
+            "/app/cookies.txt",
+            "/appdata/MusicBot/cookies.txt",
+        ]
+        for p in candidate_paths:
+            if p and os.path.exists(p):
+                resolved_cookies_path = p
+                break
+    except Exception as e:
+        logger.warning(f"Error checking cookies paths: {e}")
+
+    if not resolved_cookies_path:
+        msg = (
+            "Apple Music cookies file not found. Set COOKIES_PATH or place 'cookies.txt' in the project root. "
+            f"Checked: {', '.join([p for p in [cookies_path, '/app/cookies.txt', '/appdata/MusicBot/cookies.txt', os.path.join(os.getcwd(), 'cookies.txt'), os.path.join(os.path.dirname(__file__), 'cookies.txt')] if p])}"
+        )
+        logger.error(msg)
+        return 1, msg
+
+    # Ensure output directory exists
+    try:
+        os.makedirs(output_path, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"Failed to create output directory '{output_path}': {e}")
     
-    # Use highest quality codec available
-    if high_quality:
-        # Try ALAC (lossless) first, fall back to high-quality AAC
-        codec = "alac"
-        logger.info("🎧 Using ALAC (lossless) codec for highest quality")
-    else:
-        codec = codec or config.GAMDL_CODEC
-        logger.info(f"🎧 Using {codec} codec")
+    # Enforce AAC-only usage as requested
+    codec = codec or config.GAMDL_CODEC
+    logger.info(f"🎧 Using {codec} codec (AAC-only mode)")
     
     cmd_args = [
         "gamdl",
-        "--cookies-path", cookies_path,
+        "--cookies-path", resolved_cookies_path,
         "--codec-song", codec,
         "--remux-mode", remux_mode,
         "--output-path", output_path,
     ]
     
-    # Add quality settings for listening rooms
-    if high_quality:
-        cmd_args.extend([
-            "--template-folder", "{album_artist}/{album}",  # Better organization
-            "--template-file", "{track:02d} {title}",       # Track numbers
-            "--exclude-tags", "false",                      # Keep all metadata
-            "--sanity-check", "true",                       # Verify downloads
-        ])
+    # Add organized templates and sanity checks
+    cmd_args.extend([
+        "--template-folder", "{album_artist}/{album}",
+        "--template-file", "{track:02d} {title}",
+        "--exclude-tags", "false",
+        "--sanity-check", "true",
+    ])
     
     cmd_args.append(url)
     
+    process = None
     try:
         # Add timeout to prevent hanging
         process = await asyncio.wait_for(
@@ -1486,13 +1512,21 @@ async def run_gamdl(
         if process.returncode == 0:
             logger.info(f"✅ Download succeeded with {codec}")
         else:
-            # If ALAC failed, try falling back to AAC
-            if high_quality and codec == "alac":
-                logger.warning(f"❌ ALAC failed, falling back to AAC-legacy")
-                return await run_gamdl(url, cookies_path, "aac-legacy", remux_mode, output_path, False)
-            else:
-                logger.warning(f"❌ Failed with {codec}: {process.returncode}")
-                logger.warning(f"Output: {output}")
+            logger.warning(f"❌ Failed with {codec}: {process.returncode}")
+            logger.warning(f"Output: {output}")
+            # Provide hint if authentication seems to be the cause
+            auth_hints = [
+                "No Active Subscription",
+                "401",
+                "_check_amp_api_response",
+                "Apple Music API",
+                "get_account_info",
+            ]
+            if any(hint in output for hint in auth_hints):
+                output += (
+                    "\n\nHint: Apple Music authentication likely failed. Refresh your cookies.txt from an active Apple Music web session "
+                    "and set COOKIES_PATH (or place cookies.txt alongside bot.py)."
+                )
         
         return process.returncode, output
         
